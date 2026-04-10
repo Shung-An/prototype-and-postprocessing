@@ -1,0 +1,49 @@
+# Git
+.git/
+
+# OS / editor clutter
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.tmp
+*.bak
+*.swp
+*.swo
+*.orig
+~$*
+
+# MATLAB
+*.asv
+*.autosave
+slprj/
+codegen/
+resources/project/
+*.mlx.autosave
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# Logs
+*.log
+
+# Local measurement outputs and transient exports
+*.fig
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+*.gif
+
+# If you want to keep large simulation output or data snapshots out of git,
+# uncomment the lines below as needed.
+# *.mat
+# *.csv
+# *.txt
+# *.mph
