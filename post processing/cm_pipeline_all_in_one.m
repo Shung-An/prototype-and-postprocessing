@@ -19,11 +19,16 @@ end
 
 % Physics Config
 bin_mm         = 0.1;                  
-scale_factor   = (0.24^2) / (32768^2); 
+scale_factor   = (0.24^2) / (32768^2)*100; 
 mm_to_ps       = 6.6;                  
 max_xticks     = 10;                   
 frame_dt_s     = 0.025;                
 rel_threshold  = 0.20;  
+enable_dropped_window_gating = true;
+enable_saturation_cleanup = true;
+enable_variance_gating = false;
+enable_channel_health_gating = false;
+saturation_threshold_ch11 = 3e-7;
 
 %% ---------- Anti-diagonal pairs ----------
 pairs = [
@@ -114,9 +119,9 @@ fprintf('==========================================\n');
 %% ---------- Basic Cleanup (FIXED) ----------
 % FIX: Ensure tCM_s and posOnCM are filtered using the SAME MASK as cm.
 % Previously, cm rows were deleted but tCM_s was just truncated at the end.
-dirty_mask = cm(:,1) > 1e-6;
-if any(dirty_mask)
-    fprintf('Removing %d frames due to CH1 saturation (>1e-6).\n', sum(dirty_mask));
+dirty_mask = cm(:,1) > saturation_threshold_ch11;
+if enable_saturation_cleanup && any(dirty_mask)
+    fprintf('Removing %d frames due to Ch(1,1) saturation (>%.1e).\n', sum(dirty_mask), saturation_threshold_ch11);
     cm(dirty_mask, :) = []; 
     tCM_s(dirty_mask) = [];
     tCM(dirty_mask) = []; % Keep datetime aligned
@@ -137,7 +142,9 @@ end
 %% ---------- FILTER 0: DROPPED WINDOWS & BASIC CLEANUP ----------
 fprintf('\n--- DROPPED WINDOW GATING ---\n');
 fDropped = fullfile(runFolder, 'dropped_window.log');
-if isfile(fDropped)
+if ~enable_dropped_window_gating
+    fprintf('Dropped window gating disabled. Keeping all frames.\n');
+elseif isfile(fDropped)
     txt_dropped = fileread(fDropped);
     % Extract the start and end times from "Between: START - END"
     drop_tokens = regexp(txt_dropped, 'Between:\s*(\d{2}:\d{2}:\d{2}\.\d+)\s*-\s*(\d{2}:\d{2}:\d{2}\.\d+)', 'tokens');
@@ -178,9 +185,11 @@ else
 end
 
 fprintf('\n--- BASIC SATURATION CLEANUP ---\n');
-dirty_mask = cm(:,1) > 1e-6;
-if any(dirty_mask)
-    fprintf('Removing %d frames due to CH1 saturation (>1e-6).\n', sum(dirty_mask));
+dirty_mask = cm(:,1) > saturation_threshold_ch11;
+if ~enable_saturation_cleanup
+    fprintf('Basic saturation cleanup disabled. Keeping all frames.\n');
+elseif any(dirty_mask)
+    fprintf('Removing %d frames due to Ch(1,1) saturation (>%.1e).\n', sum(dirty_mask), saturation_threshold_ch11);
     cm(dirty_mask, :)   = []; 
     tCM_s(dirty_mask)   = [];
     tCM(dirty_mask)     = []; % Keep datetime aligned
@@ -223,7 +232,9 @@ exportgraphics(f_var, fullfile(runFolder, 'variance_gating_check.png')); close(f
 is_dead_frame = frame_rms < rms_cutoff;
 n_dead = sum(is_dead_frame);
 
-if n_dead > 0
+if ~enable_variance_gating
+    fprintf('Variance gating disabled. Keeping all frames.\n');
+elseif n_dead > 0
     fprintf('Rejecting %d frames (%.1f%%) based on Low Variance.\n', n_dead, (n_dead/N)*100);
     % [CRITICAL STEP] The data 'cm' is OVERWRITTEN here. Bad frames are deleted.
     cm = cm(~is_dead_frame, :); 
@@ -244,7 +255,9 @@ bad_chs = find(channel_kurt > 5.0);
 valid_pair_mask = true(size(pairs,1), 1);
 idx_ch = @(r,c) sub2ind([8 8], r, c);
 
-if ~isempty(bad_chs)
+if ~enable_channel_health_gating
+    fprintf('\nChannel health gating disabled. Keeping all pairs.\n');
+elseif ~isempty(bad_chs)
     fprintf('\n[WARN] Found %d bad channels (Kurtosis > 5).\n', numel(bad_chs));
     for i = 1:size(pairs,1)
         if ismember(idx_ch(pairs(i,1),pairs(i,2)), bad_chs) || ismember(idx_ch(pairs(i,3),pairs(i,4)), bad_chs)
@@ -592,6 +605,68 @@ set(gca,'XScale','log','YScale','log'); grid on; legend;
 title('Log-Log Evaluation (Cleaned)');
 exportgraphics(f_ll, fullfile(runFolder,'loglog_eval.png')); close(f_ll);
 
+%% ---------- 8x8 MATRIX PATTERN OUTPUTS ----------
+fprintf('Saving 8x8 matrix-pattern outputs...\n');
+matrix_mean = mean(cm, 1);
+matrix_mse = mean((cm - matrix_mean).^2, 1);
+matrix_mean_8x8 = reshape(matrix_mean, 8, 8);
+matrix_mse_8x8 = reshape(matrix_mse, 8, 8);
+matrix_mean_urad2_8x8 = reshape(scale_to_urad2(matrix_mean), 8, 8);
+
+diag_offset_8x8 = zeros(8, 8);
+for d = -7:7
+    diag_vals = diag(matrix_mean_8x8, d);
+    if isempty(diag_vals), continue; end
+    offset = diag_vals(end);
+    for k = 1:numel(diag_vals)
+        if d >= 0
+            i = k;
+            j = k + d;
+        else
+            i = k - d;
+            j = k;
+        end
+        diag_offset_8x8(i, j) = matrix_mean_8x8(i, j) - offset;
+    end
+end
+diag_offset_urad2_8x8 = scale_to_urad2(diag_offset_8x8);
+
+save(fullfile(runFolder, 'matrix_pattern_outputs.mat'), ...
+    'matrix_mean_8x8', 'matrix_mse_8x8', 'matrix_mean_urad2_8x8', ...
+    'diag_offset_8x8', 'diag_offset_urad2_8x8', '-v7.3');
+writematrix(matrix_mean_8x8, fullfile(runFolder, 'matrix_mean_8x8_V2.csv'));
+writematrix(matrix_mse_8x8, fullfile(runFolder, 'matrix_mse_8x8_V4.csv'));
+writematrix(matrix_mean_urad2_8x8, fullfile(runFolder, 'matrix_mean_8x8_urad2.csv'));
+writematrix(diag_offset_8x8, fullfile(runFolder, 'matrix_diag_offset_8x8_V2.csv'));
+writematrix(diag_offset_urad2_8x8, fullfile(runFolder, 'matrix_diag_offset_8x8_urad2.csv'));
+
+f_mat = figure('Visible', 'off', 'Color', 'w', 'Position', [100 100 1200 900]);
+tiledlayout(2, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
+
+nexttile;
+h_mean = heatmap(matrix_mean_8x8, 'ColorbarVisible', 'on');
+h_mean.CellLabelFormat = '%.2e';
+title('Mean Corr (V^2)');
+
+nexttile;
+h_mse = heatmap(matrix_mse_8x8, 'ColorbarVisible', 'on');
+h_mse.CellLabelFormat = '%.2e';
+title('MSE Corr (V^4)');
+
+nexttile;
+h_mean_u = heatmap(matrix_mean_urad2_8x8, 'ColorbarVisible', 'on');
+h_mean_u.CellLabelFormat = '%.2e';
+title('Mean Corr (\mu rad^2)');
+
+nexttile;
+h_diag = heatmap(diag_offset_8x8, 'ColorbarVisible', 'on');
+h_diag.CellLabelFormat = '%.2e';
+title('Diagonal Tail-Offset (V^2)');
+
+colormap(jet);
+exportgraphics(f_mat, fullfile(runFolder, 'matrix_pattern_heatmaps.png'), 'Resolution', 300);
+close(f_mat);
+
 %% ---------- UPDATE METADATA JSON ----------
 fprintf('\n--- UPDATING METADATA.JSON ---\n');
 jsonFile = fullfile(runFolder, 'metadata.json');
@@ -621,7 +696,11 @@ try
     fprintf('Successfully updated %s\n', jsonFile);
 catch ME, warning('Failed to write JSON: %s', ME.message); end
 
-try extra_analysis(cm, frame_dt_s, runFolder, CF_max, pairs, pairLabels); catch; end
+try
+    extra_analysis(cm, frame_dt_s, runFolder, CF_max, pairs, pairLabels);
+catch ME
+    warning('extra_analysis failed: %s', ME.message);
+end
 fprintf('Pipeline Completed Successfully.\n');
 end
 
