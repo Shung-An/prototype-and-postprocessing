@@ -303,6 +303,7 @@ class DataFilesBrowser(tk.Tk):
         self.sort_descending = True
         self.active_run: RunRecord | None = None
         self.filters_expanded = True
+        self.run_by_iid: dict[str, RunRecord] = {}
         self.column_order = ["star", "date", "sample", "power", "temp", "duration", "shot_noise", "range", "run"]
         self.visible_columns = {"star", "date", "sample", "power", "temp", "duration", "shot_noise", "range"}
 
@@ -392,6 +393,13 @@ class DataFilesBrowser(tk.Tk):
         self.tree.grid(row=0, column=0, sticky="nsew")
         self.tree.bind("<<TreeviewSelect>>", self.on_select_run)
         self.tree.bind("<Double-1>", self.on_tree_double_click)
+        self.tree.bind("<Button-3>", self.on_tree_right_click)
+
+        self.tree_menu = tk.Menu(self, tearoff=0)
+        self.tree_menu.add_command(label="Toggle Star", command=self.toggle_star_from_menu)
+        self.tree_menu.add_command(label="Open Folder", command=self.open_selected_folder)
+        self.tree_menu.add_command(label="Open Image", command=self.open_selected_image)
+        self.tree_menu.add_command(label="Open MP4", command=self.open_selected_mp4)
 
         scrollbar = ttk.Scrollbar(table_wrap, orient="vertical", command=self.tree.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
@@ -484,8 +492,9 @@ class DataFilesBrowser(tk.Tk):
 
         self.count_var.set(f"{len(self.filtered_runs)} runs")
         if self.filtered_runs:
-            self.tree.selection_set("0")
-            self.tree.focus("0")
+            first_iid = str(self.filtered_runs[0].folder_path)
+            self.tree.selection_set(first_iid)
+            self.tree.focus(first_iid)
             self.show_run(self.filtered_runs[0])
         else:
             self.clear_selection()
@@ -494,21 +503,25 @@ class DataFilesBrowser(tk.Tk):
         for item in self.tree.get_children():
             self.tree.delete(item)
 
-        for index, run in enumerate(self.filtered_runs):
+        self.run_by_iid.clear()
+
+        for run in self.filtered_runs:
+            iid = str(run.folder_path)
+            self.run_by_iid[iid] = run
             self.tree.insert(
                 "",
                 "end",
-                iid=str(index),
+                iid=iid,
                 values=(
                     "[x]" if run.star_measurement else "[ ]",
                     run.sortable_date.strftime("%Y-%m-%d %H:%M"),
-                    run.folder_name,
                     run.sample or "-",
                     run.sample_power_display,
                     run.environment_temperature_display,
                     run.duration or "-",
                     run.shot_noise_display,
                     run.scan_range_display,
+                    run.folder_name,
                 ),
             )
 
@@ -554,8 +567,9 @@ class DataFilesBrowser(tk.Tk):
         self._sort_filtered_runs()
         self._populate_tree()
         if self.filtered_runs:
-            self.tree.selection_set("0")
-            self.tree.focus("0")
+            first_iid = str(self.filtered_runs[0].folder_path)
+            self.tree.selection_set(first_iid)
+            self.tree.focus(first_iid)
             self.show_run(self.filtered_runs[0])
         else:
             self.clear_selection()
@@ -564,7 +578,9 @@ class DataFilesBrowser(tk.Tk):
         selection = self.tree.selection()
         if not selection:
             return
-        run = self.filtered_runs[int(selection[0])]
+        run = self.run_by_iid.get(selection[0])
+        if run is None:
+            return
         self.show_run(run)
 
     def on_tree_double_click(self, event: tk.Event[tk.Widget]) -> None:
@@ -573,7 +589,28 @@ class DataFilesBrowser(tk.Tk):
         row_id = self.tree.identify_row(event.y)
         if region != "cell" or column_id != "#1" or not row_id:
             return
-        run = self.filtered_runs[int(row_id)]
+        run = self.run_by_iid.get(row_id)
+        if run is None:
+            return
+        self.set_star_measurement(run, not run.star_measurement)
+
+    def on_tree_right_click(self, event: tk.Event[tk.Widget]) -> None:
+        row_id = self.tree.identify_row(event.y)
+        if not row_id:
+            return
+        self.tree.selection_set(row_id)
+        self.tree.focus(row_id)
+        run = self.run_by_iid.get(row_id)
+        if run is None:
+            return
+        toggle_label = "Unstar Measurement" if run.star_measurement else "Star Measurement"
+        self.tree_menu.entryconfigure(0, label=toggle_label)
+        self.tree_menu.tk_popup(event.x_root, event.y_root)
+
+    def toggle_star_from_menu(self) -> None:
+        run = self._selected_run()
+        if run is None:
+            return
         self.set_star_measurement(run, not run.star_measurement)
 
     def show_run(self, run: RunRecord) -> None:
@@ -661,10 +698,11 @@ class DataFilesBrowser(tk.Tk):
         selection = self.tree.selection()
         if not selection:
             return None
-        return self.filtered_runs[int(selection[0])]
+        return self.run_by_iid.get(selection[0])
 
     def set_star_measurement(self, run: RunRecord, new_value: bool) -> None:
         try:
+            selected_iid = str(run.folder_path)
             payload: dict[str, object]
             if run.metadata_path and run.metadata_path.exists():
                 payload = json.loads(run.metadata_path.read_text(encoding="utf-8"))
@@ -678,10 +716,10 @@ class DataFilesBrowser(tk.Tk):
             run.metadata_text = json.dumps(payload, indent=2)
             self._refresh_search_blob(run)
             self._populate_tree()
-            selection = self.tree.selection()
-            if selection:
-                self.tree.selection_set(selection[0])
-                self.tree.focus(selection[0])
+            if self.tree.exists(selected_iid):
+                self.tree.selection_set(selected_iid)
+                self.tree.focus(selected_iid)
+                self.show_run(run)
             self.status_var.set(f"Updated star flag for {run.folder_name}.")
         except Exception as exc:
             messagebox.showerror("Star Update Failed", f"Could not update metadata.json:\n{exc}")
