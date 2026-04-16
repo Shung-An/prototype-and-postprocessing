@@ -9,7 +9,7 @@ import tkinter as tk
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 try:
     from PIL import Image, ImageTk  # type: ignore
@@ -27,8 +27,10 @@ STD_PLOT_NAME = "raw_std_within_parity.png"
 
 @dataclass
 class PhysicsData:
+    sample_power_mw: float | None = None
     power_mw_1: float | None = None
     power_mw_2: float | None = None
+    environment_temperature_c: float | None = None
     sensitivity_v_photon: float | None = None
     shot_noise_urad2_rthz: float | None = None
     scan_range_mm: float | None = None
@@ -56,6 +58,7 @@ class RunRecord:
     tags: list[str] = field(default_factory=list)
     filename: str = ""
     duration: str = ""
+    star_measurement: bool = False
     physics: PhysicsData = field(default_factory=PhysicsData)
     metadata_text: str = ""
     search_blob: str = ""
@@ -78,15 +81,27 @@ class RunRecord:
         return f"{center:.4f}"
 
     @property
-    def sensitivity_display(self) -> str:
-        value = self.physics.sensitivity_v_photon
+    def shot_noise_display(self) -> str:
+        value = self.physics.shot_noise_urad2_rthz
         if value is None:
             return "-"
         return f"{value:.2f}"
 
     @property
-    def shot_noise_display(self) -> str:
-        value = self.physics.shot_noise_urad2_rthz
+    def sample_power_display(self) -> str:
+        if self.physics.sample_power_mw is not None:
+            return f"{self.physics.sample_power_mw:.3f}"
+        if self.physics.power_mw_1 is not None and self.physics.power_mw_2 is not None:
+            return f"{self.physics.power_mw_1:.3f} / {self.physics.power_mw_2:.3f}"
+        if self.physics.power_mw_1 is not None:
+            return f"{self.physics.power_mw_1:.3f}"
+        if self.physics.power_mw_2 is not None:
+            return f"{self.physics.power_mw_2:.3f}"
+        return "-"
+
+    @property
+    def environment_temperature_display(self) -> str:
+        value = self.physics.environment_temperature_c
         if value is None:
             return "-"
         return f"{value:.2f}"
@@ -107,6 +122,37 @@ def safe_float(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _nested_value(payload: object, path: tuple[str, ...]) -> object:
+    current = payload
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def first_matching_value(payload: dict[str, object], paths: list[tuple[str, ...]]) -> object:
+    for path in paths:
+        value = _nested_value(payload, path)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def first_matching_float(payload: dict[str, object], paths: list[tuple[str, ...]]) -> float | None:
+    return safe_float(first_matching_value(payload, paths))
+
+
+def safe_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on", "star", "starred"}
+    return False
 
 
 def load_run_record(final_result_path: Path) -> RunRecord:
@@ -141,11 +187,46 @@ def load_run_record(final_result_path: Path) -> RunRecord:
             record.tags = [str(tag) for tag in payload.get("Tags", []) if tag]
             record.filename = payload.get("Filename", "") or ""
             record.duration = payload.get("Duration", "") or ""
+            record.star_measurement = safe_bool(
+                first_matching_value(
+                    payload,
+                    [
+                        ("StarMeasurement",),
+                        ("StarredMeasurement",),
+                        ("IsStarMeasurement",),
+                        ("IsStarred",),
+                    ],
+                )
+            )
 
             physics = payload.get("PhysicsData", {}) or {}
             record.physics = PhysicsData(
+                sample_power_mw=first_matching_float(
+                    payload,
+                    [
+                        ("SamplePower_mW",),
+                        ("SamplePower_mW_1",),
+                        ("PhysicsData", "SamplePower_mW"),
+                        ("PhysicsData", "SamplePower_mW_1"),
+                        ("PhysicsData", "Power_mW_1"),
+                        ("Power_mW_1",),
+                    ],
+                ),
                 power_mw_1=safe_float(physics.get("Power_mW_1")),
                 power_mw_2=safe_float(physics.get("Power_mW_2")),
+                environment_temperature_c=first_matching_float(
+                    payload,
+                    [
+                        ("EnvironmentTemperature_C",),
+                        ("EnvironmentTemperatureC",),
+                        ("Temperature_C",),
+                        ("TemperatureC",),
+                        ("PhysicsData", "EnvironmentTemperature_C"),
+                        ("PhysicsData", "EnvironmentTemperatureC"),
+                        ("Environment", "Temperature_C"),
+                        ("Environment", "TemperatureC"),
+                    ],
+                ),
                 sensitivity_v_photon=safe_float(physics.get("Sensitivity_V_photon")),
                 shot_noise_urad2_rthz=safe_float(physics.get("ShotNoiseResult_urad2_rtHz")),
                 scan_range_mm=safe_float(physics.get("ScanRange_mm")),
@@ -165,6 +246,9 @@ def load_run_record(final_result_path: Path) -> RunRecord:
         record.tags_display,
         record.filename,
         record.final_result_path.name,
+        record.sample_power_display,
+        record.environment_temperature_display,
+        "star" if record.star_measurement else "",
     ]
     record.search_blob = " ".join(part for part in search_parts if part).lower()
     return record
@@ -180,6 +264,30 @@ def scan_runs(root_path: Path) -> list[RunRecord]:
 
 
 class DataFilesBrowser(tk.Tk):
+    COLUMN_TITLES = {
+        "star": "Star",
+        "date": "Date",
+        "run": "Run Folder",
+        "sample": "Sample",
+        "power": "Power (mW)",
+        "temp": "Temp (C)",
+        "duration": "Elapsed",
+        "shot_noise": "Shot Noise",
+        "range": "Range (mm)",
+    }
+
+    COLUMN_WIDTHS = {
+        "star": 55,
+        "date": 140,
+        "run": 220,
+        "sample": 185,
+        "power": 95,
+        "temp": 85,
+        "duration": 90,
+        "shot_noise": 95,
+        "range": 90,
+    }
+
     def __init__(self) -> None:
         super().__init__()
         self.title("DataFiles Browser")
@@ -191,6 +299,12 @@ class DataFilesBrowser(tk.Tk):
         self.filtered_runs: list[RunRecord] = []
         self.preview_image = None
         self.analysis_thread: threading.Thread | None = None
+        self.sort_column = "date"
+        self.sort_descending = True
+        self.active_run: RunRecord | None = None
+        self.filters_expanded = True
+        self.column_order = ["star", "date", "sample", "power", "temp", "duration", "shot_noise", "range", "run"]
+        self.visible_columns = {"star", "date", "sample", "power", "temp", "duration", "shot_noise", "range"}
 
         self.root_var = tk.StringVar(value=str(ROOT_DEFAULT))
         self.search_var = tk.StringVar()
@@ -245,37 +359,39 @@ class DataFilesBrowser(tk.Tk):
         search_box.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         search_box.columnconfigure(0, weight=1)
         tk.Label(search_box, text="Search", bg="white", fg="#12353c", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
-        tk.Entry(search_box, textvariable=self.search_var, font=("Segoe UI", 11)).grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        self.filter_toggle_button = tk.Button(
+            search_box,
+            text="Hide Filters",
+            width=12,
+            command=self.toggle_filter_panel,
+        )
+        self.filter_toggle_button.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        self.search_entry = tk.Entry(search_box, textvariable=self.search_var, font=("Segoe UI", 11))
+        self.search_entry.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         self.search_var.trace_add("write", lambda *_: self.apply_filter())
-        scan_filter_row = tk.Frame(search_box, bg="white")
-        scan_filter_row.grid(row=2, column=0, sticky="ew", pady=(10, 0))
-        tk.Label(scan_filter_row, text="Scan range >=", bg="white", fg="#12353c").pack(side="left")
-        tk.Entry(scan_filter_row, textvariable=self.scan_range_min_var, width=10).pack(side="left", padx=(8, 4))
-        tk.Label(scan_filter_row, text="mm", bg="white", fg="#62777c").pack(side="left")
+        self.scan_filter_row = tk.Frame(search_box, bg="white")
+        self.scan_filter_row.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        tk.Label(self.scan_filter_row, text="Scan range >=", bg="white", fg="#12353c").pack(side="left")
+        tk.Entry(self.scan_filter_row, textvariable=self.scan_range_min_var, width=10).pack(side="left", padx=(8, 4))
+        tk.Label(self.scan_filter_row, text="mm", bg="white", fg="#62777c").pack(side="left")
         self.scan_range_min_var.trace_add("write", lambda *_: self.apply_filter())
-        tk.Label(search_box, textvariable=self.count_var, bg="white", fg="#62777c").grid(row=0, column=1, rowspan=3, sticky="e", padx=(12, 0))
+        tk.Button(self.scan_filter_row, text="Columns...", command=self.open_column_manager).pack(side="right")
+        tk.Label(search_box, textvariable=self.count_var, bg="white", fg="#62777c").grid(row=1, column=1, rowspan=2, sticky="ne", padx=(12, 0))
 
         table_wrap = tk.Frame(left, bg="white", highlightthickness=1, highlightbackground="#d8e0e1")
         table_wrap.grid(row=1, column=0, sticky="nsew")
         table_wrap.rowconfigure(0, weight=1)
         table_wrap.columnconfigure(0, weight=1)
 
-        columns = ("date", "run", "sample", "duration", "sensitivity", "shot_noise", "range")
+        columns = tuple(self.column_order)
         self.tree = ttk.Treeview(table_wrap, columns=columns, show="headings", height=24)
-        headings = {
-            "date": ("Date", 140),
-            "run": ("Run Folder", 220),
-            "sample": ("Sample", 170),
-            "duration": ("Elapsed", 90),
-            "sensitivity": ("Sensitivity", 95),
-            "shot_noise": ("Shot Noise", 95),
-            "range": ("Range (mm)", 90),
-        }
-        for key, (title, width) in headings.items():
-            self.tree.heading(key, text=title)
-            self.tree.column(key, width=width, anchor="w")
+        for key in columns:
+            self.tree.heading(key, text=self.COLUMN_TITLES[key], command=lambda column=key: self.sort_by_column(column))
+            self.tree.column(key, width=self.COLUMN_WIDTHS[key], anchor="w")
+        self._apply_display_columns()
         self.tree.grid(row=0, column=0, sticky="nsew")
         self.tree.bind("<<TreeviewSelect>>", self.on_select_run)
+        self.tree.bind("<Double-1>", self.on_tree_double_click)
 
         scrollbar = ttk.Scrollbar(table_wrap, orient="vertical", command=self.tree.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
@@ -297,19 +413,26 @@ class DataFilesBrowser(tk.Tk):
         tk.Button(action_frame, text="Open MP4", width=12, command=self.open_selected_mp4).pack(side="left", padx=(0, 8))
         tk.Button(action_frame, text="Rerun Selected", width=14, command=self.rerun_selected_analysis).pack(side="left", padx=(0, 8))
         tk.Button(action_frame, text="Rerun Filtered", width=14, command=self.rerun_filtered_analysis).pack(side="left")
+        tk.Button(action_frame, text="Run Picked Folders", width=16, command=self.run_picked_folders).pack(side="left", padx=(8, 0))
 
-        content = tk.PanedWindow(right, orient=tk.HORIZONTAL, sashwidth=8, bg="#f3f1ea")
+        content = tk.Frame(right, bg="#f3f1ea")
         content.grid(row=1, column=0, sticky="nsew")
+        content.columnconfigure(0, weight=2)
+        content.columnconfigure(1, weight=1)
+        content.rowconfigure(0, weight=1)
 
         preview_wrap = tk.Frame(content, bg="white", padx=12, pady=12, highlightthickness=1, highlightbackground="#d8e0e1")
+        preview_wrap.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         preview_wrap.rowconfigure(1, weight=1)
         preview_wrap.columnconfigure(0, weight=1)
         tk.Label(preview_wrap, text="final_clean_result Preview", bg="white", fg="#12353c", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
 
         self.preview_label = tk.Label(preview_wrap, bg="#edf2f2", anchor="center")
         self.preview_label.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        self.preview_label.bind("<Double-Button-1>", lambda _event: self.open_selected_mp4())
 
         detail_wrap = tk.Frame(content, bg="#f3f1ea")
+        detail_wrap.grid(row=0, column=1, sticky="nsew")
         detail_wrap.columnconfigure(0, weight=1)
         detail_wrap.rowconfigure(0, weight=1)
 
@@ -318,9 +441,6 @@ class DataFilesBrowser(tk.Tk):
         tk.Label(std_wrap, text="Std Evolution Preview", bg="white", fg="#12353c", font=("Segoe UI", 12, "bold")).pack(anchor="w")
         self.std_preview_label = tk.Label(std_wrap, bg="#edf2f2", anchor="center")
         self.std_preview_label.pack(fill="both", expand=True, pady=(10, 0))
-
-        content.add(preview_wrap, stretch="always", minsize=500)
-        content.add(detail_wrap, stretch="always", minsize=360)
 
         status = tk.Label(self, textvariable=self.status_var, bg="#f3f1ea", fg="#5a6e73", anchor="w")
         status.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 12))
@@ -359,6 +479,18 @@ class DataFilesBrowser(tk.Tk):
                 and self._matches_scan_range(run, min_range)
             ]
 
+        self._sort_filtered_runs()
+        self._populate_tree()
+
+        self.count_var.set(f"{len(self.filtered_runs)} runs")
+        if self.filtered_runs:
+            self.tree.selection_set("0")
+            self.tree.focus("0")
+            self.show_run(self.filtered_runs[0])
+        else:
+            self.clear_selection()
+
+    def _populate_tree(self) -> None:
         for item in self.tree.get_children():
             self.tree.delete(item)
 
@@ -368,17 +500,59 @@ class DataFilesBrowser(tk.Tk):
                 "end",
                 iid=str(index),
                 values=(
+                    "[x]" if run.star_measurement else "[ ]",
                     run.sortable_date.strftime("%Y-%m-%d %H:%M"),
                     run.folder_name,
                     run.sample or "-",
+                    run.sample_power_display,
+                    run.environment_temperature_display,
                     run.duration or "-",
-                    run.sensitivity_display,
                     run.shot_noise_display,
                     run.scan_range_display,
                 ),
             )
 
-        self.count_var.set(f"{len(self.filtered_runs)} runs")
+    def _sort_filtered_runs(self) -> None:
+        self.filtered_runs.sort(
+            key=lambda run: self._sort_key(run, self.sort_column),
+            reverse=self.sort_descending,
+        )
+
+    def _sort_key(self, run: RunRecord, column: str) -> tuple[int, object]:
+        if column == "star":
+            return (0, 1 if run.star_measurement else 0)
+        if column == "date":
+            return (0, run.sortable_date)
+        if column == "run":
+            return (0, run.folder_name.lower())
+        if column == "sample":
+            return (0, run.sample.lower())
+        if column == "power":
+            value = run.physics.sample_power_mw
+            if value is None:
+                value = run.physics.power_mw_1
+            return (1 if value is None else 0, value if value is not None else 0.0)
+        if column == "temp":
+            value = run.physics.environment_temperature_c
+            return (1 if value is None else 0, value if value is not None else 0.0)
+        if column == "duration":
+            return (0, run.duration.lower())
+        if column == "shot_noise":
+            value = run.physics.shot_noise_urad2_rthz
+            return (1 if value is None else 0, value if value is not None else 0.0)
+        if column == "range":
+            value = run.physics.scan_range_mm
+            return (1 if value is None else 0, value if value is not None else 0.0)
+        return (0, run.folder_name.lower())
+
+    def sort_by_column(self, column: str) -> None:
+        if self.sort_column == column:
+            self.sort_descending = not self.sort_descending
+        else:
+            self.sort_column = column
+            self.sort_descending = column == "date"
+        self._sort_filtered_runs()
+        self._populate_tree()
         if self.filtered_runs:
             self.tree.selection_set("0")
             self.tree.focus("0")
@@ -393,8 +567,19 @@ class DataFilesBrowser(tk.Tk):
         run = self.filtered_runs[int(selection[0])]
         self.show_run(run)
 
+    def on_tree_double_click(self, event: tk.Event[tk.Widget]) -> None:
+        region = self.tree.identify("region", event.x, event.y)
+        column_id = self.tree.identify_column(event.x)
+        row_id = self.tree.identify_row(event.y)
+        if region != "cell" or column_id != "#1" or not row_id:
+            return
+        run = self.filtered_runs[int(row_id)]
+        self.set_star_measurement(run, not run.star_measurement)
+
     def show_run(self, run: RunRecord) -> None:
-        self.selected_title.configure(text=run.folder_name)
+        self.active_run = run
+        summary = run.sample or "Unknown sample"
+        self.selected_title.configure(text=f"{summary}   {run.sortable_date.strftime('%Y-%m-%d %H:%M')}")
         self._set_image_preview(self.preview_label, run.final_result_path, (780, 620), "Image not found")
         self._set_image_preview(
             self.std_preview_label,
@@ -404,6 +589,7 @@ class DataFilesBrowser(tk.Tk):
         )
 
     def clear_selection(self) -> None:
+        self.active_run = None
         self.selected_title.configure(text="Nothing selected")
         self.preview_label.configure(image="", text="")
         self.std_preview_label.configure(image="", text="Select a run to preview std evolution.")
@@ -477,6 +663,122 @@ class DataFilesBrowser(tk.Tk):
             return None
         return self.filtered_runs[int(selection[0])]
 
+    def set_star_measurement(self, run: RunRecord, new_value: bool) -> None:
+        try:
+            payload: dict[str, object]
+            if run.metadata_path and run.metadata_path.exists():
+                payload = json.loads(run.metadata_path.read_text(encoding="utf-8"))
+            else:
+                payload = {}
+                run.metadata_path = run.folder_path / "metadata.json"
+
+            payload["StarMeasurement"] = new_value
+            run.metadata_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            run.star_measurement = new_value
+            run.metadata_text = json.dumps(payload, indent=2)
+            self._refresh_search_blob(run)
+            self._populate_tree()
+            selection = self.tree.selection()
+            if selection:
+                self.tree.selection_set(selection[0])
+                self.tree.focus(selection[0])
+            self.status_var.set(f"Updated star flag for {run.folder_name}.")
+        except Exception as exc:
+            messagebox.showerror("Star Update Failed", f"Could not update metadata.json:\n{exc}")
+
+    def _refresh_search_blob(self, run: RunRecord) -> None:
+        search_parts = [
+            run.folder_name,
+            str(run.folder_path),
+            run.sample,
+            run.description,
+            run.tags_display,
+            run.filename,
+            run.final_result_path.name,
+            run.sample_power_display,
+            run.environment_temperature_display,
+            "star" if run.star_measurement else "",
+        ]
+        run.search_blob = " ".join(part for part in search_parts if part).lower()
+
+    def _apply_display_columns(self) -> None:
+        visible = [column for column in self.column_order if column in self.visible_columns]
+        self.tree.configure(displaycolumns=visible)
+
+    def toggle_filter_panel(self) -> None:
+        self.filters_expanded = not self.filters_expanded
+        if self.filters_expanded:
+            self.search_entry.grid()
+            self.scan_filter_row.grid()
+            self.filter_toggle_button.configure(text="Hide Filters")
+        else:
+            self.search_entry.grid_remove()
+            self.scan_filter_row.grid_remove()
+            self.filter_toggle_button.configure(text="Show Filters")
+
+    def open_column_manager(self) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title("Column Manager")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.configure(bg="#f3f1ea")
+
+        tk.Label(dialog, text="Reorder columns and choose which ones are visible.", bg="#f3f1ea", fg="#12353c").grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(12, 8)
+        )
+
+        listbox = tk.Listbox(dialog, height=10, activestyle="dotbox")
+        listbox.grid(row=1, column=0, rowspan=4, sticky="nsew", padx=(12, 8), pady=(0, 12))
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(1, weight=1)
+
+        visibility_vars: dict[str, tk.BooleanVar] = {}
+        checks = tk.Frame(dialog, bg="#f3f1ea")
+        checks.grid(row=1, column=1, sticky="nw", padx=(0, 12), pady=(0, 8))
+
+        def refresh_listbox() -> None:
+            listbox.delete(0, tk.END)
+            for column in self.column_order:
+                visible_label = "Shown" if visibility_vars[column].get() else "Hidden"
+                listbox.insert(tk.END, f"{self.COLUMN_TITLES[column]} ({visible_label})")
+
+        for column in self.column_order:
+            visibility_vars[column] = tk.BooleanVar(value=column in self.visible_columns)
+            tk.Checkbutton(
+                checks,
+                text=self.COLUMN_TITLES[column],
+                variable=visibility_vars[column],
+                command=refresh_listbox,
+                bg="#f3f1ea",
+                activebackground="#f3f1ea",
+            ).pack(anchor="w")
+
+        def move_selected(delta: int) -> None:
+            selection = listbox.curselection()
+            if not selection:
+                return
+            index = selection[0]
+            new_index = index + delta
+            if new_index < 0 or new_index >= len(self.column_order):
+                return
+            self.column_order[index], self.column_order[new_index] = self.column_order[new_index], self.column_order[index]
+            refresh_listbox()
+            listbox.selection_set(new_index)
+
+        def apply_columns() -> None:
+            self.visible_columns = {column for column, var in visibility_vars.items() if var.get()}
+            if not self.visible_columns:
+                self.visible_columns = {"date"}
+            self._apply_display_columns()
+            dialog.destroy()
+
+        tk.Button(dialog, text="Move Up", width=14, command=lambda: move_selected(-1)).grid(row=1, column=1, sticky="ne", padx=(0, 12))
+        tk.Button(dialog, text="Move Down", width=14, command=lambda: move_selected(1)).grid(row=2, column=1, sticky="ne", padx=(0, 12), pady=(6, 0))
+        tk.Button(dialog, text="Apply", width=14, command=apply_columns).grid(row=3, column=1, sticky="se", padx=(0, 12), pady=(18, 0))
+        tk.Button(dialog, text="Close", width=14, command=dialog.destroy).grid(row=4, column=1, sticky="ne", padx=(0, 12), pady=(6, 12))
+
+        refresh_listbox()
+
     def open_selected_folder(self) -> None:
         run = self._selected_run()
         if run is None:
@@ -514,6 +816,38 @@ class DataFilesBrowser(tk.Tk):
             return
         folder_paths = [run.folder_path for run in self.filtered_runs]
         self._start_analysis(folder_paths, f"{len(folder_paths)} filtered runs")
+
+    def run_picked_folders(self) -> None:
+        folder_paths = self._pick_folder_paths()
+        if not folder_paths:
+            return
+        self._start_analysis(folder_paths, f"{len(folder_paths)} picked folders")
+
+    def _pick_folder_paths(self) -> list[Path]:
+        picked_paths: list[Path] = []
+        initial_dir = self.root_var.get().strip() or str(ROOT_DEFAULT)
+
+        while True:
+            selected = filedialog.askdirectory(
+                title="Select a Run Folder for cm_pipeline_all_in_one",
+                initialdir=initial_dir,
+            )
+            if not selected:
+                break
+
+            selected_path = Path(selected)
+            if selected_path not in picked_paths:
+                picked_paths.append(selected_path)
+            initial_dir = str(selected_path.parent)
+
+            add_more = messagebox.askyesno(
+                "Add Another Folder",
+                f"Added:\n{selected_path}\n\nDo you want to add another folder?",
+            )
+            if not add_more:
+                break
+
+        return picked_paths
 
     def _start_analysis(self, folder_paths: list[Path], label: str) -> None:
         if self.analysis_thread is not None and self.analysis_thread.is_alive():

@@ -25,11 +25,21 @@ except ImportError:
 
 
 BIN_MM = 0.1
+# Area scaling from detector pixel units to percent:
+# - 0.24 is the detector pitch in mm per pixel.
+# - 32768 is the full-scale detector count used to normalize the raw signal.
+# - 100 converts the resulting fraction to percent.
 SCALE_FACTOR = (0.24**2) / (32768**2) * 100
+# Conversion factor from distance in millimeters to time in picoseconds for this setup.
 MM_TO_PS = 6.6
-FRAME_DT_S = 0.025
-RAW_STD_FRAME_INTEGRATION_S = 67 / 4867
+# Time per processed frame, in seconds:
+# 67 acquired samples at a 4861 Hz acquisition rate.
+FRAME_DT_S = 67 / 4861
+RAW_STD_FRAME_INTEGRATION_S = FRAME_DT_S
+# Relative gating threshold expressed as a fraction of the reference level (20%).
 REL_THRESHOLD = 0.20
+# Empirical saturation cutoff for channel 11 signal values.
+# Samples above this level are treated as saturated during cleanup/gating.
 SATURATION_THRESHOLD_CH11 = 3e-7
 
 ENABLE_DROPPED_WINDOW_GATING = False
@@ -81,8 +91,6 @@ PAIRS = np.array(
         [7, 2, 8, 3],
         [4, 3, 8, 7],
         [5, 3, 8, 6],
-        [6, 3, 8, 5],
-        [7, 3, 8, 4],
         [5, 4, 8, 7],
         [6, 4, 8, 6],
         [7, 4, 8, 5],
@@ -93,8 +101,13 @@ PAIRS = np.array(
     dtype=int,
 )
 
-CRITICAL_PAIR_SIGMA_THRESHOLD = 3.0
-CRITICAL_PAIR_MAX_COUNT = 10
+# A pair is treated as "critical" when its metric exceeds a 3-sigma deviation from
+# the expected distribution. 3.0 was chosen as a conventional outlier cutoff: it is
+# strict enough to suppress most noise-driven excursions, while still surfacing
+# pair behavior that is statistically unusual and likely to reflect a real issue in
+# the measurement rather than normal frame-to-frame variation.
+# Cap the number of displayed critical pairs to keep the summary plots readable.
+CRITICAL_PAIR_MAX_COUNT = 8
 
 
 @dataclass
@@ -251,33 +264,18 @@ def critical_pair_indices(
     amps: np.ndarray,
     pairs: np.ndarray,
     max_count: int = CRITICAL_PAIR_MAX_COUNT,
-    sigma_threshold: float = CRITICAL_PAIR_SIGMA_THRESHOLD,
 ) -> tuple[list[int], list[dict[str, float | int]]]:
     if amps.size == 0 or pairs.size == 0:
         return [], []
 
     offsets = np.asarray([pair_diagonal_offset(pair) for pair in pairs], dtype=int)
-    scores = np.full(pairs.shape[0], -np.inf, dtype=float)
+    mean_corr = np.nanmean(amps, axis=0)
+    global_mean = float(np.nanmean(mean_corr))
+    scores = np.abs(mean_corr - global_mean)
     peak_amplitudes = np.nanmax(np.abs(amps), axis=0)
 
-    for offset in np.unique(offsets):
-        group_indices = np.where(offsets == offset)[0]
-        group_amps = amps[:, group_indices]
-        baseline = np.nanmedian(group_amps, axis=1)
-        residual = group_amps - baseline[:, None]
-        scale = np.nanmedian(np.abs(residual), axis=1)
-        scale = np.where(np.isfinite(scale) & (scale > 1e-12), scale, 1.0)
-        normalized = np.abs(residual) / scale[:, None]
-        scores[group_indices] = np.nanmax(normalized, axis=0)
-
     ranked = np.argsort(np.nan_to_num(scores, nan=-np.inf))[::-1]
-    keep_indices = [
-        int(idx)
-        for idx in ranked
-        if np.isfinite(scores[idx]) and scores[idx] >= sigma_threshold and np.isfinite(peak_amplitudes[idx])
-    ]
-    if not keep_indices:
-        keep_indices = [int(idx) for idx in ranked[: min(max_count, len(ranked))] if np.isfinite(scores[idx])]
+    keep_indices = [int(idx) for idx in ranked if np.isfinite(scores[idx]) and np.isfinite(peak_amplitudes[idx])]
     keep_indices = keep_indices[: min(max_count, len(keep_indices))]
 
     details = [
@@ -285,6 +283,8 @@ def critical_pair_indices(
             "pair_index": int(idx),
             "diagonal_offset": int(offsets[idx]),
             "critical_score": float(scores[idx]),
+            "mean_correlation": float(mean_corr[idx]),
+            "global_mean_correlation": global_mean,
             "peak_abs_amplitude": float(peak_amplitudes[idx]),
         }
         for idx in keep_indices
@@ -299,7 +299,17 @@ def write_critical_pairs_summary(
 ) -> None:
     with (run_folder / "critical_pairs_summary.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["pair_index", "label", "diagonal_offset", "critical_score", "peak_abs_amplitude"])
+        writer.writerow(
+            [
+                "pair_index",
+                "label",
+                "diagonal_offset",
+                "critical_score",
+                "mean_correlation",
+                "global_mean_correlation",
+                "peak_abs_amplitude",
+            ]
+        )
         for detail in details:
             pair_index = int(detail["pair_index"])
             writer.writerow(
@@ -308,6 +318,8 @@ def write_critical_pairs_summary(
                     pair_labels_list[pair_index],
                     detail["diagonal_offset"],
                     f"{float(detail['critical_score']):.6f}",
+                    f"{float(detail['mean_correlation']):.6f}",
+                    f"{float(detail['global_mean_correlation']):.6f}",
                     f"{float(detail['peak_abs_amplitude']):.6f}",
                 ]
             )
@@ -661,6 +673,24 @@ def save_frames_per_position(run_folder: Path, bin_vals: np.ndarray, counts: np.
     plt.close(fig)
 
 
+def build_bin_cumsums_and_counts(
+    pair_diffs: np.ndarray,
+    inverse: np.ndarray,
+    valid_indices: np.ndarray,
+    conversion_factor: float,
+) -> tuple[list[np.ndarray], np.ndarray]:
+    bin_cumsums: list[np.ndarray] = []
+    counts = np.zeros(valid_indices.size, dtype=int)
+    for b_idx, orig_idx in enumerate(valid_indices):
+        members = pair_diffs[inverse == orig_idx]
+        counts[b_idx] = members.shape[0]
+        if members.size == 0:
+            bin_cumsums.append(np.empty((0, pair_diffs.shape[1]), dtype=float))
+            continue
+        bin_cumsums.append(scale_to_urad2(np.cumsum(members, axis=0), conversion_factor))
+    return bin_cumsums, counts
+
+
 def save_all_pairs_plot(
     run_folder: Path, ts: np.ndarray, amps: np.ndarray, pair_labels_list: list[str], meta: Meta, kmin: int
 ) -> None:
@@ -727,13 +757,20 @@ def save_loglog_eval(
     if not keep_indices:
         keep_indices = list(range(min(CRITICAL_PAIR_MAX_COUNT, len(labels))))
 
+    keep_arr = np.asarray(keep_indices, dtype=int)
+    selected_pairs = pairs[keep_arr]
+    pair_i1 = np.array([idx_lin(pair[0], pair[1]) for pair in selected_pairs], dtype=int)
+    pair_i2 = np.array([idx_lin(pair[2], pair[3]) for pair in selected_pairs], dtype=int)
+    diffs = cm[:, pair_i1] - cm[:, pair_i2]
+    divisors = np.arange(1, len(time_tail) + 1, dtype=float)[:, None]
+    run_means = np.cumsum(diffs, axis=0) / divisors
+    yvals = np.abs(scale_to_urad2(run_means, conversion_factor))
+    yvals[yvals <= 0] = np.nan
+
     fig, ax = plt.subplots(figsize=(9, 6.5))
-    for idx in keep_indices:
-        p = pairs[idx]
-        run_mean = np.cumsum(cm[:, idx_lin(p[0], p[1])] - cm[:, idx_lin(p[2], p[3])]) / np.arange(1, len(time_tail) + 1)
-        y = np.abs(scale_to_urad2(run_mean, conversion_factor))
-        y[y <= 0] = np.nan
-        ax.loglog(np.maximum(time_tail, FRAME_DT_S), y, label=labels[idx])
+    xvals = np.maximum(time_tail, FRAME_DT_S)
+    for col_idx, pair_idx in enumerate(keep_indices):
+        ax.loglog(xvals, yvals[:, col_idx], label=labels[pair_idx])
     ax.set_title("Log-Log Evaluation (Cleaned)")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel(r"|Running Mean| ($\mu rad^2$)")
@@ -859,21 +896,21 @@ def save_loglog_eval_pairs_runmean(run_folder: Path, cm: np.ndarray, pairs: np.n
         return
 
     pairs_uni, labels_uni = dedupe_pairs(pairs, labels)
-    curves: list[np.ndarray] = []
-    for pair in pairs_uni:
-        diff_v2 = cm[start_idx:, idx_lin(pair[0], pair[1])] - cm[start_idx:, idx_lin(pair[2], pair[3])]
-        run_mean = np.cumsum(diff_v2) / np.arange(1, diff_v2.size + 1)
-        run_mean_u = scale_to_urad2(run_mean, conversion_factor)
-        y = np.abs(run_mean_u) if use_abs else run_mean_u
-        y[~np.isfinite(y) | (y <= 0)] = np.nan
-        curves.append(y)
+    pair_i1 = np.array([idx_lin(pair[0], pair[1]) for pair in pairs_uni], dtype=int)
+    pair_i2 = np.array([idx_lin(pair[2], pair[3]) for pair in pairs_uni], dtype=int)
+    diff_v2 = cm[start_idx:, pair_i1] - cm[start_idx:, pair_i2]
+    run_mean = np.cumsum(diff_v2, axis=0) / np.arange(1, diff_v2.shape[0] + 1, dtype=float)[:, None]
+    curves = scale_to_urad2(run_mean, conversion_factor)
+    if use_abs:
+        curves = np.abs(curves)
+    curves[~np.isfinite(curves) | (curves <= 0)] = np.nan
 
     max_lines_per_plot = 8
-    for group_idx, lo in enumerate(range(0, len(curves), max_lines_per_plot), start=1):
-        hi = min(lo + max_lines_per_plot, len(curves))
+    for group_idx, lo in enumerate(range(0, curves.shape[1], max_lines_per_plot), start=1):
+        hi = min(lo + max_lines_per_plot, curves.shape[1])
         fig, ax = plt.subplots(figsize=(10, 7))
         for idx in range(lo, hi):
-            ax.plot(time_tail, curves[idx], linewidth=1.8, label=labels_uni[idx])
+            ax.plot(time_tail, curves[:, idx], linewidth=1.8, label=labels_uni[idx])
         ax.set_xscale("log")
         if use_abs:
             ax.set_yscale("log")
@@ -892,7 +929,7 @@ def save_variation_and_fft(
     run_folder: Path,
     ts: np.ndarray,
     counts: np.ndarray,
-    cumsums: list[list[np.ndarray]],
+    bin_cumsums: list[np.ndarray],
     labels: list[str],
     keep_indices: list[int],
 ) -> None:
@@ -906,8 +943,11 @@ def save_variation_and_fft(
 
     fig_var, ax_var = plt.subplots(figsize=(12, 7))
     fig_fft, ax_fft = plt.subplots(figsize=(12, 7))
+    best_bin = bin_cumsums[best_bin_idx]
     for idx in keep_indices:
-        v = cumsums[idx][best_bin_idx]
+        if best_bin.size == 0:
+            continue
+        v = best_bin[:, idx]
         if v.size <= 2:
             continue
         raw_vals = np.concatenate(([v[0]], np.diff(v)))
@@ -944,7 +984,7 @@ def save_signal_emergence_movie(
     run_folder: Path,
     ts: np.ndarray,
     counts: np.ndarray,
-    cumsums: list[list[np.ndarray]],
+    bin_cumsums: list[np.ndarray],
     labels: list[str],
     keep_indices: list[int],
 ) -> None:
@@ -967,6 +1007,10 @@ def save_signal_emergence_movie(
 
     n_movie_frames = min(400, k_max_common)
     frame_steps = np.unique(np.round(np.linspace(1, k_max_common, n_movie_frames)).astype(int))
+    selected_bin_cumsums = [
+        bin_curve[:, keep_indices] if bin_curve.size else np.empty((0, len(keep_indices)), dtype=float)
+        for bin_curve in bin_cumsums
+    ]
 
     movie_path = run_folder / "signal_emergence.mp4"
     fig, ax = plt.subplots(figsize=(12, 7))
@@ -981,13 +1025,14 @@ def save_signal_emergence_movie(
 
     with imageio.get_writer(movie_path, fps=15, macro_block_size=1) as writer:
         for k in frame_steps:
+            current_matrix = np.full((len(keep_indices), len(ts)), np.nan, dtype=float)
+            for b_idx, bin_curve in enumerate(selected_bin_cumsums):
+                if bin_curve.shape[0] >= k:
+                    current_matrix[:, b_idx] = bin_curve[k - 1, :] / k
+
             current_stack = []
-            for line, idx in zip(line_handles, keep_indices, strict=False):
-                current = np.full(len(ts), np.nan, dtype=float)
-                for b_idx in range(len(ts)):
-                    curve = cumsums[idx][b_idx]
-                    if curve.size >= k:
-                        current[b_idx] = curve[k - 1] / k
+            for line_idx, line in enumerate(line_handles):
+                current = current_matrix[line_idx]
                 line.set_data(ts, current)
                 current_stack.append(current)
 
@@ -1018,7 +1063,7 @@ def save_signal_emergence_movie(
 def save_grouped_loglog_convergence(
     run_folder: Path,
     bin_vals: np.ndarray,
-    cumsums: list[list[np.ndarray]],
+    bin_cumsums: list[np.ndarray],
     labels: list[str],
     pair_count: int,
 ) -> None:
@@ -1052,15 +1097,16 @@ def save_grouped_loglog_convergence(
         axes_flat = axes.flatten()
         for ax_idx, pair_idx in enumerate(idx_list):
             ax = axes_flat[ax_idx]
-            frame_counts = [len(v) for v in cumsums[pair_idx] if len(v) > 0]
+            frame_counts = [bin_curve.shape[0] for bin_curve in bin_cumsums if bin_curve.shape[0] > 0]
             if not frame_counts:
                 continue
             frames_per_bin = min(frame_counts)
             time_axis = np.arange(1, frames_per_bin + 1, dtype=float) * FRAME_DT_S
             color_map = plt.cm.jet(np.linspace(0, 1, len(bin_vals)))
-            for b_idx, curve in enumerate(cumsums[pair_idx]):
-                if len(curve) < frames_per_bin:
+            for b_idx, bin_curve in enumerate(bin_cumsums):
+                if bin_curve.shape[0] < frames_per_bin:
                     continue
+                curve = bin_curve[:frames_per_bin, pair_idx]
                 cumavg = curve[:frames_per_bin] / np.arange(1, frames_per_bin + 1)
                 y = np.abs(cumavg)
                 y[y <= 0] = np.nan
@@ -1246,28 +1292,17 @@ def run_pipeline(
     pair_i2 = np.array([idx_lin(pair[2], pair[3]) for pair in pairs], dtype=int)
     pair_diffs = cm[:, pair_i1] - cm[:, pair_i2]
 
-    cumsums: list[list[np.ndarray]] = [[np.array([], dtype=float) for _ in range(len(bin_vals))] for _ in range(len(labels))]
-    for b_idx, orig_idx in enumerate(valid_indices):
-        members = pair_diffs[inverse == orig_idx]
-        if members.size == 0:
-            continue
-        members_cumsum = scale_to_urad2(np.cumsum(members, axis=0), conversion_factor)
-        for p_idx in range(len(labels)):
-            cumsums[p_idx][b_idx] = members_cumsum[:, p_idx]
+    bin_cumsums, counts = build_bin_cumsums_and_counts(pair_diffs, inverse, valid_indices, conversion_factor)
 
-    if counts.size == 0:
+    if counts.size == 0 or not np.any(counts > 0):
         raise ValueError("No valid position bins remained after filtering.")
 
-    kmin = int(np.min(counts))
+    kmin = int(np.min(counts[counts > 0]))
     amps = np.full((len(bin_vals), len(labels)), np.nan, dtype=float)
-    for b_idx in range(len(bin_vals)):
-        for p_idx in range(len(labels)):
-            curve = cumsums[p_idx][b_idx]
-            if curve.size == 0:
-                continue
-            idx_use = min(curve.size, kmin)
-            amps[b_idx, p_idx] = curve[idx_use - 1]
-    amps /= kmin
+    for b_idx, bin_curve in enumerate(bin_cumsums):
+        if bin_curve.shape[0] < kmin or kmin <= 0:
+            continue
+        amps[b_idx, :] = bin_curve[kmin - 1, :] / kmin
 
     ts = bin_vals * MM_TO_PS
     order = np.argsort(ts)
@@ -1299,9 +1334,9 @@ def run_pipeline(
     save_heatmaps(run_folder, cm, conversion_factor)
     save_semilogy_grouped_64channels(run_folder, cm, conversion_factor)
     save_loglog_eval_pairs_runmean(run_folder, cm, pairs, labels, conversion_factor)
-    save_grouped_loglog_convergence(run_folder, bin_vals, cumsums, labels, len(labels))
-    save_variation_and_fft(run_folder, ts, counts, cumsums, labels, critical_keep_indices)
-    save_signal_emergence_movie(run_folder, ts, counts, cumsums, labels, critical_keep_indices)
+    save_grouped_loglog_convergence(run_folder, bin_vals, bin_cumsums, labels, len(labels))
+    save_variation_and_fft(run_folder, ts, counts, bin_cumsums, labels, critical_keep_indices)
+    save_signal_emergence_movie(run_folder, ts, counts, bin_cumsums, labels, critical_keep_indices)
     update_metadata_json(run_folder, meta)
 
 
