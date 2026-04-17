@@ -36,17 +36,16 @@ MM_TO_PS = 6.6
 # 67 acquired samples at a 4861 Hz acquisition rate.
 FRAME_DT_S = 67 / 4861
 RAW_STD_FRAME_INTEGRATION_S = FRAME_DT_S
-# Relative gating threshold expressed as a fraction of the reference level (20%).
-REL_THRESHOLD = 0.20
 # Empirical saturation cutoff for channel 11 signal values.
 # Samples above this level are treated as saturated during cleanup/gating.
 SATURATION_THRESHOLD_CH11 = 3e-7
+SHOT_NOISE_RESULT_V2_THRESHOLD = 10_000
 
 ENABLE_DROPPED_WINDOW_GATING = False
 ENABLE_SATURATION_CLEANUP = False
 ENABLE_VARIANCE_GATING = False
 ENABLE_CHANNEL_HEALTH_GATING = False
-ENABLE_EVEN_FRAMES_ONLY = True
+ENABLE_EVEN_FRAMES_ONLY = False
 
 PAIRS = np.array(
     [
@@ -256,6 +255,12 @@ def scale_to_urad2(values: np.ndarray, conversion_factor: float) -> np.ndarray:
     return (values / cf) * 1e12
 
 
+def use_v2_for_shot_noise(meta: Meta) -> bool:
+    return bool(
+        np.isfinite(meta.shot_noise_result) and meta.shot_noise_result > SHOT_NOISE_RESULT_V2_THRESHOLD
+    )
+
+
 def pair_diagonal_offset(pair: np.ndarray) -> int:
     return max(abs(int(pair[0]) - int(pair[2])), abs(int(pair[1]) - int(pair[3])))
 
@@ -421,14 +426,7 @@ def save_raw_std_analysis(run_folder: Path, raw_cm: np.ndarray, t_seconds: np.nd
 
     frame_idx = np.arange(raw_cm.shape[0], dtype=int)
     raw_std = raw_cm.std(axis=1)
-    parity = np.where(frame_idx % 2 == 0, "even", "odd")
     integrated_time_s = (frame_idx + 1) * RAW_STD_FRAME_INTEGRATION_S
-
-    odd_mask = parity == "odd"
-    even_mask = parity == "even"
-    threshold = math.nan
-    if np.any(odd_mask) and np.any(even_mask):
-        threshold = 0.5 * (float(np.mean(raw_std[odd_mask])) + float(np.mean(raw_std[even_mask])))
 
     with (run_folder / "raw_std_analysis.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
@@ -437,64 +435,28 @@ def save_raw_std_analysis(run_folder: Path, raw_cm: np.ndarray, t_seconds: np.nd
                 "frame_index",
                 "frame_number_1based",
                 "integrated_time_s",
-                "index_parity",
                 "raw_std",
-                "raw_std_threshold",
-                "raw_std_predicted_group",
             ]
         )
-        for idx, time_s, std_value, group in zip(frame_idx, integrated_time_s, raw_std, parity, strict=False):
-            predicted = ""
-            if np.isfinite(threshold):
-                predicted = "odd_like" if std_value >= threshold else "even_like"
-            writer.writerow([idx, idx + 1, f"{time_s:.6f}", group, f"{std_value:.6f}", threshold, predicted])
+        for idx, time_s, std_value in zip(frame_idx, integrated_time_s, raw_std, strict=False):
+            writer.writerow([idx, idx + 1, f"{time_s:.6f}", f"{std_value:.6f}"])
 
-    colors = {"odd": "#1f77b4", "even": "#d62728"}
     fig, ax = plt.subplots(figsize=(12, 6.5))
-    for group_name in ("odd", "even"):
-        mask = parity == group_name
-        if not np.any(mask):
-            continue
-        ax.scatter(integrated_time_s[mask], raw_std[mask], s=20, alpha=0.8, color=colors[group_name], label=group_name)
-    if np.isfinite(threshold):
-        ax.axhline(threshold, color="black", linestyle="--", linewidth=1.2, label="Std threshold")
-    ax.set_title("Raw Std by Frame Parity")
+    ax.plot(integrated_time_s, raw_std, "o-", color="#1f77b4", markersize=3.5, linewidth=1.0, label="Raw std")
+    window = min(9, raw_std.size)
+    if window % 2 == 0:
+        window -= 1
+    if window >= 3:
+        kernel = np.ones(window, dtype=float) / window
+        trend = np.convolve(raw_std, kernel, mode="same")
+        ax.plot(integrated_time_s, trend, color="black", linewidth=1.5, label=f"Rolling mean ({window})")
+    ax.set_title("Raw Std Evolution")
     ax.set_xlabel("Integrated time (s)")
     ax.set_ylabel("Raw std")
     ax.grid(True, alpha=0.25)
     ax.legend(frameon=False)
     fig.tight_layout()
-    fig.savefig(run_folder / "raw_std_by_parity.png")
-    plt.close(fig)
-
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8))
-    for ax, group_name in zip(axes, ("odd", "even"), strict=False):
-        mask = parity == group_name
-        if not np.any(mask):
-            ax.set_title(f"{group_name.title()} Frames")
-            ax.text(0.5, 0.5, "No frames in this group", transform=ax.transAxes, ha="center", va="center")
-            ax.axis("off")
-            continue
-
-        group_std = raw_std[mask]
-        group_time = integrated_time_s[mask]
-        window = min(9, group_std.size)
-        if window % 2 == 0:
-            window -= 1
-
-        ax.plot(group_time, group_std, "o-", color=colors[group_name], markersize=3.5, linewidth=1.0, label="Raw std")
-        if window >= 3:
-            kernel = np.ones(window, dtype=float) / window
-            trend = np.convolve(group_std, kernel, mode="same")
-            ax.plot(group_time, trend, color="black", linewidth=1.5, label=f"Rolling mean ({window})")
-        ax.set_title(f"{group_name.title()}-Frame Std Evolution")
-        ax.set_xlabel("Integrated time (s)")
-        ax.set_ylabel("Raw std")
-        ax.grid(True, alpha=0.25)
-        ax.legend(frameon=False)
-
-    fig.tight_layout()
-    fig.savefig(run_folder / "raw_std_within_parity.png")
+    fig.savefig(run_folder / "raw_std_over_time.png")
     plt.close(fig)
 
 
@@ -701,9 +663,10 @@ def save_all_pairs_plot(
 
     ax.set_xlabel("Delay (ps)")
     ax.set_ylabel(r"Amplitude ($\mu rad^2$)")
+    shot_noise_unit = "V^2" if use_v2_for_shot_noise(meta) else r"$\mu rad^2$"
     title_lines = [
         f"ALL Pairs Result at k={kmin}",
-        f"Power: {np.nansum([meta.p1_mw, meta.p2_mw]):.2f}mW | Range: {meta.scan_range:.1f}mm | ShotNoise: {meta.shot_noise_result:.1f}",
+        f"Power: {np.nansum([meta.p1_mw, meta.p2_mw]):.2f}mW | Range: {meta.scan_range:.1f}mm | ShotNoise: {meta.shot_noise_result:.1f} {shot_noise_unit}",
     ]
     ax.set_title("\n".join(title_lines))
     if amps.shape[1] <= 20:
@@ -728,6 +691,7 @@ def save_selected_pairs_plot(
     amps: np.ndarray,
     pair_labels_list: list[str],
     keep_indices: list[int],
+    acquisition_time_s: float,
 ) -> None:
     if not keep_indices:
         keep_indices = list(range(min(CRITICAL_PAIR_MAX_COUNT, len(pair_labels_list))))
@@ -738,7 +702,7 @@ def save_selected_pairs_plot(
 
     ax.set_xlabel("Delay (ps)")
     ax.set_ylabel(r"Amplitude ($\mu rad^2$)")
-    ax.set_title("Critical Pairs Summary")
+    ax.set_title(f"Critical Pairs Summary | Acquisition: {acquisition_time_s:.2f} s")
     ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
     fig.tight_layout()
     fig.savefig(run_folder / "final_clean_result.png")
@@ -894,6 +858,7 @@ def save_loglog_eval_pairs_runmean(run_folder: Path, cm: np.ndarray, pairs: np.n
     time_tail = time_tail - time_tail[0] if time_tail.size else np.array([], dtype=float)
     if time_tail.size == 0:
         return
+    xvals = np.maximum(time_tail, FRAME_DT_S)
 
     pairs_uni, labels_uni = dedupe_pairs(pairs, labels)
     pair_i1 = np.array([idx_lin(pair[0], pair[1]) for pair in pairs_uni], dtype=int)
@@ -910,15 +875,16 @@ def save_loglog_eval_pairs_runmean(run_folder: Path, cm: np.ndarray, pairs: np.n
         hi = min(lo + max_lines_per_plot, curves.shape[1])
         fig, ax = plt.subplots(figsize=(10, 7))
         for idx in range(lo, hi):
-            ax.plot(time_tail, curves[:, idx], linewidth=1.8, label=labels_uni[idx])
-        ax.set_xscale("log")
+            if use_abs:
+                ax.loglog(xvals, curves[:, idx], linewidth=1.8, label=labels_uni[idx])
+            else:
+                ax.plot(time_tail, curves[:, idx], linewidth=1.8, label=labels_uni[idx])
         if use_abs:
-            ax.set_yscale("log")
             ax.set_ylabel(r"Abs Running Mean ($\mu rad^2$)")
         else:
             ax.set_ylabel(r"Running Mean ($\mu rad^2$)")
         ax.set_xlabel("Time (s)")
-        ax.set_title(f"Running-Mean of Cumsum, Pairs {lo + 1}-{hi}")
+        ax.set_title(f"Running-Mean vs Time, Pairs {lo + 1}-{hi}")
         ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
         fig.tight_layout()
         fig.savefig(run_folder / f"loglog_eval_pairs_runmean_urad2_group_{group_idx:02d}.png")
@@ -1143,7 +1109,13 @@ def update_metadata_json(run_folder: Path, meta: Meta) -> None:
     physics["ShotNoise2_V"] = None if not np.isfinite(meta.shot_noise2_v) else meta.shot_noise2_v
     physics["SignalLevel_V2_rtHz"] = None if not np.isfinite(meta.signal_level) else meta.signal_level
     physics["ConversionFactor_V2_rad2"] = None if not np.isfinite(meta.conversion_factor) else meta.conversion_factor
-    physics["ShotNoiseResult_urad2_rtHz"] = None if not np.isfinite(meta.shot_noise_result) else meta.shot_noise_result
+    physics.pop("ShotNoiseResult_urad2_rtHz", None)
+    physics.pop("ShotNoiseResult_V2_rtHz", None)
+    shot_noise_result = None if not np.isfinite(meta.shot_noise_result) else meta.shot_noise_result
+    if use_v2_for_shot_noise(meta):
+        physics["ShotNoiseResult_V2_rtHz"] = shot_noise_result
+    else:
+        physics["ShotNoiseResult_urad2_rtHz"] = shot_noise_result
     physics["ScanRange_mm"] = meta.scan_range
     physics["ScanMin_mm"] = meta.scan_min
     physics["ScanMax_mm"] = meta.scan_max
@@ -1255,8 +1227,8 @@ def run_pipeline(
 
     frame_rms = cm.std(axis=1)
     rms_cutoff = otsu_like_threshold(frame_rms)
-    save_variance_gating_check(run_folder, frame_rms, rms_cutoff)
     if ENABLE_VARIANCE_GATING:
+        save_variance_gating_check(run_folder, frame_rms, rms_cutoff)
         keep = frame_rms >= rms_cutoff
         cm = cm[keep]
         t_seconds = t_seconds[keep]
@@ -1280,9 +1252,8 @@ def run_pipeline(
     pos_bin = np.round(pos_on_cm / BIN_MM) * BIN_MM
     unique_bins, inverse = np.unique(pos_bin, return_inverse=True)
     counts = np.bincount(inverse)
-    mean_positive = counts[counts > 0].mean() if np.any(counts > 0) else 0
-    min_count = int(round(REL_THRESHOLD * mean_positive))
-    keep_bins = counts >= min_count
+    min_count = 0
+    keep_bins = counts > 0
     bin_vals = unique_bins[keep_bins]
     counts = counts[keep_bins]
     valid_indices = np.where(keep_bins)[0]
@@ -1321,7 +1292,8 @@ def run_pipeline(
             writer.writerow([f"{delay:.6f}", *row])
 
     save_all_pairs_plot(run_folder, ts, amps, labels, meta, kmin)
-    save_selected_pairs_plot(run_folder, ts, amps, labels, critical_keep_indices)
+    acquisition_time_s = float(t_seconds[-1] - t_seconds[0]) if t_seconds.size > 1 else 0.0
+    save_selected_pairs_plot(run_folder, ts, amps, labels, critical_keep_indices, acquisition_time_s)
     save_loglog_eval(
         run_folder,
         np.maximum(t_seconds - t_seconds[0], FRAME_DT_S),
