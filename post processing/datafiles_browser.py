@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import messagebox, ttk
 
 try:
     from PIL import Image, ImageTk  # type: ignore
@@ -23,8 +26,23 @@ ROOT_DEFAULT = Path(r"D:\Quantum Squeezing Project\DataFiles")
 FINAL_RESULT_NAME = "final_clean_result.png"
 MOVIE_NAME = "signal_emergence.mp4"
 PIPELINE_SCRIPT_NAME = "cm_pipeline_all_in_one.py"
-STD_PLOT_NAME = "raw_std_within_parity.png"
+LOGLOG_PLOT_NAME = "loglog_eval.png"
+DIAGONAL_OFFSET_PLOT_NAMES = ("diagonal_offset_matrix_urad2.png", "diagonal_offset_matrix_V2.png")
+RAW_STD_PLOT_NAMES = ("raw_std_over_time.png", "raw_std_within_parity.png")
 CONFIG_PATH = Path(tempfile.gettempdir()) / "quantum_datafiles_browser_config.json"
+INDEX_DB_PATH = Path(tempfile.gettempdir()) / "quantum_datafiles_browser_index.sqlite3"
+FILTER_DEBOUNCE_MS = 180
+PREVIEW_RESIZE_DEBOUNCE_MS = 120
+PREVIEW_SIZE_BUCKET_PX = 64
+PREVIEW_CACHE_LIMIT = 48
+FFT_DEFAULT_OUTPUT_DIR = Path(r"C:\Quantum Squeezing\Andy test\GageStreamThruGPU-FFT")
+FFT_RESULT_IMAGE_NAME = "fft_result_python.png"
+FFT_CHANNEL_FILES = (
+    ("Board 1 Ch 1", "Data_1_1"),
+    ("Board 1 Ch 2", "Data_1_2"),
+    ("Board 2 Ch 1", "Data_2_1"),
+    ("Board 2 Ch 2", "Data_2_2"),
+)
 
 
 @dataclass
@@ -53,7 +71,9 @@ class RunRecord:
     folder_path: Path
     final_result_path: Path
     movie_path: Path | None
-    std_plot_path: Path | None
+    loglog_plot_path: Path | None
+    diagonal_offset_path: Path | None
+    raw_std_plot_path: Path | None
     metadata_path: Path | None
     sortable_date: datetime
     sample: str = ""
@@ -165,6 +185,120 @@ def safe_bool(value: object) -> bool:
     return False
 
 
+def first_existing_path(folder_path: Path, names: tuple[str, ...]) -> Path | None:
+    for name in names:
+        candidate = folder_path / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def parse_fft_header(header_path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in header_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+
+def find_fft_output_dir(preferred_dir: Path | None = None) -> Path:
+    candidates = []
+    if preferred_dir is not None:
+        candidates.append(preferred_dir)
+    candidates.extend(
+        [
+            FFT_DEFAULT_OUTPUT_DIR,
+            FFT_DEFAULT_OUTPUT_DIR / "x64" / "Debug",
+            Path.cwd(),
+        ]
+    )
+
+    for candidate in candidates:
+        if candidate.exists() and any((candidate / f"{stem}.bin").is_file() for _, stem in FFT_CHANNEL_FILES):
+            return candidate
+
+    return (preferred_dir or FFT_DEFAULT_OUTPUT_DIR).expanduser().resolve()
+
+
+def _average_fft_file(data_path: Path, fft_size: int, chunk_frames: int = 1024) -> tuple[object, int]:
+    try:
+        import numpy as np  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("NumPy is required to average FFT output files.") from exc
+
+    point_count = data_path.stat().st_size // 8
+    frame_count = point_count // fft_size
+    if frame_count <= 0:
+        raise ValueError(f"No complete FFT frames found in {data_path}")
+
+    mmap = np.memmap(data_path, dtype=np.float64, mode="r", shape=(frame_count, fft_size))
+    total = np.zeros(fft_size, dtype=np.float64)
+    for start in range(0, frame_count, chunk_frames):
+        stop = min(start + chunk_frames, frame_count)
+        total += mmap[start:stop].sum(axis=0)
+    return total / frame_count, frame_count
+
+
+def build_fft_spectrum_plot(output_dir: Path | None = None, open_image: bool = True) -> Path:
+    try:
+        import matplotlib.pyplot as plt  # type: ignore
+        import numpy as np  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("Matplotlib and NumPy are required to plot FFT results.") from exc
+
+    output_dir = find_fft_output_dir(output_dir)
+    first_header_path = output_dir / f"{FFT_CHANNEL_FILES[0][1]}.fft"
+    if not first_header_path.is_file():
+        raise FileNotFoundError(f"Could not find FFT header: {first_header_path}")
+
+    header = parse_fft_header(first_header_path)
+    sample_rate_hz = float(header.get("SampleRate", "1000000000"))
+    fft_length = int(header.get("FftLength", "8192"))
+    fft_size = int(header.get("FftSize", str(fft_length // 2 + 1)))
+    freqs_mhz = np.arange(fft_size, dtype=np.float64) * sample_rate_hz / fft_length / 1e6
+
+    fig, ax = plt.subplots(figsize=(12, 7), dpi=120)
+    plotted = 0
+    frame_counts: list[int] = []
+    for label, stem in FFT_CHANNEL_FILES:
+        data_path = output_dir / f"{stem}.bin"
+        header_path = output_dir / f"{stem}.fft"
+        if not data_path.is_file() or not header_path.is_file():
+            continue
+        channel_header = parse_fft_header(header_path)
+        channel_fft_size = int(channel_header.get("FftSize", str(fft_size)))
+        if channel_fft_size != fft_size:
+            raise ValueError(f"{header_path.name} has FftSize={channel_fft_size}, expected {fft_size}")
+
+        avg_magnitude, frame_count = _average_fft_file(data_path, fft_size)
+        frame_counts.append(frame_count)
+        db = 20.0 * np.log10(np.maximum(avg_magnitude, 1e-12))
+        peak_index = int(np.argmax(db))
+        ax.plot(freqs_mhz, db, linewidth=0.9, label=f"{label} | peak {freqs_mhz[peak_index]:.1f} MHz")
+        plotted += 1
+
+    if plotted == 0:
+        raise FileNotFoundError(f"No FFT Data_*.bin/Data_*.fft pairs found in {output_dir}")
+
+    frame_summary = ", ".join(str(count) for count in frame_counts)
+    ax.set_title(f"FFT Spectrum ({plotted} channels, frames: {frame_summary})")
+    ax.set_xlabel("Frequency (MHz)")
+    ax.set_ylabel("Magnitude (dB)")
+    ax.grid(True, which="both", alpha=0.28)
+    ax.legend(loc="best", fontsize=9)
+    fig.tight_layout()
+
+    image_path = output_dir / FFT_RESULT_IMAGE_NAME
+    fig.savefig(image_path)
+    plt.close(fig)
+
+    if open_image:
+        os.startfile(image_path)  # type: ignore[attr-defined]
+    return image_path
+
+
 def load_run_record(final_result_path: Path) -> RunRecord:
     folder_path = final_result_path.parent
     folder_name = folder_path.name
@@ -175,7 +309,9 @@ def load_run_record(final_result_path: Path) -> RunRecord:
         folder_path=folder_path,
         final_result_path=final_result_path,
         movie_path=(folder_path / MOVIE_NAME) if (folder_path / MOVIE_NAME).exists() else None,
-        std_plot_path=(folder_path / STD_PLOT_NAME) if (folder_path / STD_PLOT_NAME).exists() else None,
+        loglog_plot_path=(folder_path / LOGLOG_PLOT_NAME) if (folder_path / LOGLOG_PLOT_NAME).exists() else None,
+        diagonal_offset_path=first_existing_path(folder_path, DIAGONAL_OFFSET_PLOT_NAMES),
+        raw_std_plot_path=first_existing_path(folder_path, RAW_STD_PLOT_NAMES),
         metadata_path=metadata_path if metadata_path.exists() else None,
         sortable_date=parse_folder_datetime(folder_name, folder_path),
     )
@@ -282,12 +418,288 @@ def load_run_record(final_result_path: Path) -> RunRecord:
 
 
 def scan_runs(root_path: Path) -> list[RunRecord]:
-    runs: list[RunRecord] = []
-    for final_result_path in root_path.rglob(FINAL_RESULT_NAME):
-        if final_result_path.is_file():
-            runs.append(load_run_record(final_result_path))
+    final_result_paths = [path for path in root_path.rglob(FINAL_RESULT_NAME) if path.is_file()]
+    if not final_result_paths:
+        return []
+
+    max_workers = min(12, max(2, (os.cpu_count() or 4)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        runs = list(executor.map(load_run_record, final_result_paths))
+
     runs.sort(key=lambda run: run.sortable_date, reverse=True)
     return runs
+
+
+def root_db_key(root_path: Path) -> str:
+    return str(root_path.expanduser().resolve()).lower()
+
+
+def ensure_index_db() -> None:
+    with sqlite3.connect(INDEX_DB_PATH) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS runs (
+                root_key TEXT NOT NULL,
+                folder_path TEXT NOT NULL,
+                folder_name TEXT NOT NULL,
+                final_result_path TEXT NOT NULL,
+                movie_path TEXT,
+                loglog_plot_path TEXT,
+                diagonal_offset_path TEXT,
+                raw_std_plot_path TEXT,
+                metadata_path TEXT,
+                sortable_date TEXT NOT NULL,
+                sample TEXT NOT NULL,
+                description TEXT NOT NULL,
+                tags_json TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                duration TEXT NOT NULL,
+                star_measurement INTEGER NOT NULL,
+                sample_power_mw REAL,
+                power_mw_1 REAL,
+                power_mw_2 REAL,
+                environment_temperature_k REAL,
+                environment_temperature_c REAL,
+                sensitivity_v_photon REAL,
+                shot_noise_urad2_rthz REAL,
+                scan_range_mm REAL,
+                scan_min_mm REAL,
+                scan_max_mm REAL,
+                metadata_text TEXT NOT NULL,
+                search_blob TEXT NOT NULL,
+                PRIMARY KEY (root_key, folder_path)
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_root_date ON runs(root_key, sortable_date DESC)")
+        conn.execute("CREATE TABLE IF NOT EXISTS roots (root_key TEXT PRIMARY KEY, root_path TEXT NOT NULL, last_indexed_utc TEXT NOT NULL, run_count INTEGER NOT NULL)")
+
+
+def _serialize_path(path: Path | None) -> str | None:
+    return None if path is None else str(path)
+
+
+def _deserialize_path(value: str | None) -> Path | None:
+    return None if not value else Path(value)
+
+
+def upsert_run_record_in_db(root_path: Path, record: RunRecord) -> None:
+    ensure_index_db()
+    db_key = root_db_key(root_path)
+    with sqlite3.connect(INDEX_DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO runs (
+                root_key, folder_path, folder_name, final_result_path, movie_path, loglog_plot_path,
+                diagonal_offset_path, raw_std_plot_path, metadata_path, sortable_date, sample,
+                description, tags_json, filename, duration, star_measurement, sample_power_mw,
+                power_mw_1, power_mw_2, environment_temperature_k, environment_temperature_c,
+                sensitivity_v_photon, shot_noise_urad2_rthz, scan_range_mm, scan_min_mm,
+                scan_max_mm, metadata_text, search_blob
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(root_key, folder_path) DO UPDATE SET
+                folder_name=excluded.folder_name,
+                final_result_path=excluded.final_result_path,
+                movie_path=excluded.movie_path,
+                loglog_plot_path=excluded.loglog_plot_path,
+                diagonal_offset_path=excluded.diagonal_offset_path,
+                raw_std_plot_path=excluded.raw_std_plot_path,
+                metadata_path=excluded.metadata_path,
+                sortable_date=excluded.sortable_date,
+                sample=excluded.sample,
+                description=excluded.description,
+                tags_json=excluded.tags_json,
+                filename=excluded.filename,
+                duration=excluded.duration,
+                star_measurement=excluded.star_measurement,
+                sample_power_mw=excluded.sample_power_mw,
+                power_mw_1=excluded.power_mw_1,
+                power_mw_2=excluded.power_mw_2,
+                environment_temperature_k=excluded.environment_temperature_k,
+                environment_temperature_c=excluded.environment_temperature_c,
+                sensitivity_v_photon=excluded.sensitivity_v_photon,
+                shot_noise_urad2_rthz=excluded.shot_noise_urad2_rthz,
+                scan_range_mm=excluded.scan_range_mm,
+                scan_min_mm=excluded.scan_min_mm,
+                scan_max_mm=excluded.scan_max_mm,
+                metadata_text=excluded.metadata_text,
+                search_blob=excluded.search_blob
+            """,
+            (
+                db_key,
+                str(record.folder_path),
+                record.folder_name,
+                str(record.final_result_path),
+                _serialize_path(record.movie_path),
+                _serialize_path(record.loglog_plot_path),
+                _serialize_path(record.diagonal_offset_path),
+                _serialize_path(record.raw_std_plot_path),
+                _serialize_path(record.metadata_path),
+                record.sortable_date.isoformat(),
+                record.sample,
+                record.description,
+                json.dumps(record.tags),
+                record.filename,
+                record.duration,
+                1 if record.star_measurement else 0,
+                record.physics.sample_power_mw,
+                record.physics.power_mw_1,
+                record.physics.power_mw_2,
+                record.physics.environment_temperature_k,
+                record.physics.environment_temperature_c,
+                record.physics.sensitivity_v_photon,
+                record.physics.shot_noise_urad2_rthz,
+                record.physics.scan_range_mm,
+                record.physics.scan_min_mm,
+                record.physics.scan_max_mm,
+                record.metadata_text,
+                record.search_blob,
+            ),
+        )
+
+
+def write_runs_to_db(root_path: Path, runs: list[RunRecord]) -> None:
+    ensure_index_db()
+    db_key = root_db_key(root_path)
+    with sqlite3.connect(INDEX_DB_PATH) as conn:
+        conn.execute("DELETE FROM runs WHERE root_key = ?", (db_key,))
+        conn.executemany(
+            """
+            INSERT INTO runs (
+                root_key, folder_path, folder_name, final_result_path, movie_path, loglog_plot_path,
+                diagonal_offset_path, raw_std_plot_path, metadata_path, sortable_date, sample,
+                description, tags_json, filename, duration, star_measurement, sample_power_mw,
+                power_mw_1, power_mw_2, environment_temperature_k, environment_temperature_c,
+                sensitivity_v_photon, shot_noise_urad2_rthz, scan_range_mm, scan_min_mm,
+                scan_max_mm, metadata_text, search_blob
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    db_key,
+                    str(run.folder_path),
+                    run.folder_name,
+                    str(run.final_result_path),
+                    _serialize_path(run.movie_path),
+                    _serialize_path(run.loglog_plot_path),
+                    _serialize_path(run.diagonal_offset_path),
+                    _serialize_path(run.raw_std_plot_path),
+                    _serialize_path(run.metadata_path),
+                    run.sortable_date.isoformat(),
+                    run.sample,
+                    run.description,
+                    json.dumps(run.tags),
+                    run.filename,
+                    run.duration,
+                    1 if run.star_measurement else 0,
+                    run.physics.sample_power_mw,
+                    run.physics.power_mw_1,
+                    run.physics.power_mw_2,
+                    run.physics.environment_temperature_k,
+                    run.physics.environment_temperature_c,
+                    run.physics.sensitivity_v_photon,
+                    run.physics.shot_noise_urad2_rthz,
+                    run.physics.scan_range_mm,
+                    run.physics.scan_min_mm,
+                    run.physics.scan_max_mm,
+                    run.metadata_text,
+                    run.search_blob,
+                )
+                for run in runs
+            ],
+        )
+        conn.execute(
+            """
+            INSERT INTO roots(root_key, root_path, last_indexed_utc, run_count)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(root_key) DO UPDATE SET
+                root_path=excluded.root_path,
+                last_indexed_utc=excluded.last_indexed_utc,
+                run_count=excluded.run_count
+            """,
+            (db_key, str(root_path), datetime.utcnow().isoformat(), len(runs)),
+        )
+
+
+def load_runs_from_db(root_path: Path) -> list[RunRecord]:
+    ensure_index_db()
+    db_key = root_db_key(root_path)
+    with sqlite3.connect(INDEX_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM runs WHERE root_key = ? ORDER BY sortable_date DESC",
+            (db_key,),
+        ).fetchall()
+
+    runs: list[RunRecord] = []
+    for row in rows:
+        runs.append(
+            RunRecord(
+                folder_name=row["folder_name"],
+                folder_path=Path(row["folder_path"]),
+                final_result_path=Path(row["final_result_path"]),
+                movie_path=_deserialize_path(row["movie_path"]),
+                loglog_plot_path=_deserialize_path(row["loglog_plot_path"]),
+                diagonal_offset_path=_deserialize_path(row["diagonal_offset_path"]),
+                raw_std_plot_path=_deserialize_path(row["raw_std_plot_path"]),
+                metadata_path=_deserialize_path(row["metadata_path"]),
+                sortable_date=datetime.fromisoformat(row["sortable_date"]),
+                sample=row["sample"],
+                description=row["description"],
+                tags=[str(tag) for tag in json.loads(row["tags_json"] or "[]") if tag],
+                filename=row["filename"],
+                duration=row["duration"],
+                star_measurement=bool(row["star_measurement"]),
+                physics=PhysicsData(
+                    sample_power_mw=row["sample_power_mw"],
+                    power_mw_1=row["power_mw_1"],
+                    power_mw_2=row["power_mw_2"],
+                    environment_temperature_k=row["environment_temperature_k"],
+                    environment_temperature_c=row["environment_temperature_c"],
+                    sensitivity_v_photon=row["sensitivity_v_photon"],
+                    shot_noise_urad2_rthz=row["shot_noise_urad2_rthz"],
+                    scan_range_mm=row["scan_range_mm"],
+                    scan_min_mm=row["scan_min_mm"],
+                    scan_max_mm=row["scan_max_mm"],
+                ),
+                metadata_text=row["metadata_text"],
+                search_blob=row["search_blob"],
+            )
+        )
+    return runs
+
+
+def configured_root_path() -> Path:
+    try:
+        if CONFIG_PATH.exists():
+            payload = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            root_value = payload.get("root_path")
+            if isinstance(root_value, str) and root_value.strip():
+                return Path(root_value)
+    except Exception:
+        pass
+    return ROOT_DEFAULT
+
+
+def infer_index_root_for_run(run_folder: Path) -> Path:
+    configured_root = configured_root_path()
+    try:
+        run_folder.resolve().relative_to(configured_root.resolve())
+        return configured_root
+    except Exception:
+        return run_folder.parent
+
+
+def index_run_folder(run_folder: Path, root_path: Path | None = None) -> RunRecord:
+    run_folder = run_folder.expanduser().resolve()
+    root_path = (root_path or infer_index_root_for_run(run_folder)).expanduser().resolve()
+    final_result_path = run_folder / FINAL_RESULT_NAME
+    if not final_result_path.is_file():
+        raise FileNotFoundError(f"Cannot index run because {FINAL_RESULT_NAME} was not found: {final_result_path}")
+
+    record = load_run_record(final_result_path)
+    upsert_run_record_in_db(root_path, record)
+    return record
 
 
 class DataFilesBrowser(tk.Tk):
@@ -339,6 +751,14 @@ class DataFilesBrowser(tk.Tk):
         if isinstance(filters_expanded, bool):
             self.filters_expanded = filters_expanded
 
+        banner_visible = config.get("banner_visible")
+        if isinstance(banner_visible, bool):
+            self.banner_visible = banner_visible
+
+        table_visible = config.get("table_visible")
+        if isinstance(table_visible, bool):
+            self.table_visible = table_visible
+
         column_order = config.get("column_order")
         if isinstance(column_order, list):
             cleaned_order = [str(column) for column in column_order if str(column) in self.COLUMN_TITLES]
@@ -358,6 +778,8 @@ class DataFilesBrowser(tk.Tk):
                 "root_path": self.root_var.get().strip(),
                 "geometry": self.geometry(),
                 "filters_expanded": self.filters_expanded,
+                "banner_visible": self.banner_visible,
+                "table_visible": self.table_visible,
                 "column_order": self.column_order,
                 "visible_columns": sorted(self.visible_columns),
             }
@@ -374,12 +796,20 @@ class DataFilesBrowser(tk.Tk):
 
         self.all_runs: list[RunRecord] = []
         self.filtered_runs: list[RunRecord] = []
-        self.preview_image = None
+        self.preview_images: dict[tk.Label, object] = {}
+        self._preview_source_cache: dict[str, object] = {}
+        self._preview_photo_cache: dict[tuple[str, int, int], object] = {}
+        self._preview_resize_job: str | None = None
+        self._filter_job: str | None = None
+        self._scan_thread: threading.Thread | None = None
+        self._scan_request_id = 0
         self.analysis_thread: threading.Thread | None = None
         self.sort_column = "date"
         self.sort_descending = True
         self.active_run: RunRecord | None = None
         self.filters_expanded = True
+        self.banner_visible = True
+        self.table_visible = True
         self.run_by_iid: dict[str, RunRecord] = {}
         self.column_order = ["star", "date", "sample", "power", "sample_power", "temp", "duration", "shot_noise", "range", "run"]
         self.visible_columns = {"star", "date", "sample", "power", "sample_power", "temp", "duration", "shot_noise", "range"}
@@ -389,10 +819,12 @@ class DataFilesBrowser(tk.Tk):
         self.scan_range_min_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Ready.")
         self.count_var = tk.StringVar(value="0 runs")
+        self._current_root_path = Path(self.root_var.get())
         self.config_data = self._load_config()
         self._apply_loaded_config()
 
         self._build_ui()
+        self.bind("<Configure>", self._on_window_configure)
         self.refresh_runs()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -400,43 +832,46 @@ class DataFilesBrowser(tk.Tk):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
 
-        header = tk.Frame(self, bg="#12353c", padx=16, pady=16)
-        header.grid(row=0, column=0, sticky="nsew", padx=16, pady=(16, 8))
-        header.columnconfigure(0, weight=1)
+        self.header_frame = tk.Frame(self, bg="#12353c", padx=16, pady=16)
+        self.header_frame.grid(row=0, column=0, sticky="nsew", padx=16, pady=(16, 8))
+        self.header_frame.columnconfigure(0, weight=1)
 
         tk.Label(
-            header,
+            self.header_frame,
             text="Quantum DataFiles Browser",
             bg="#12353c",
             fg="white",
             font=("Segoe UI", 20, "bold"),
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
-            header,
+            self.header_frame,
             text="Fast search over runs with final_clean_result preview, metadata, and one-click open actions.",
             bg="#12353c",
             fg="#d7e8ea",
             font=("Segoe UI", 10),
         ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
-        controls = tk.Frame(header, bg="#12353c")
+        controls = tk.Frame(self.header_frame, bg="#12353c")
         controls.grid(row=0, column=1, rowspan=2, sticky="e")
         tk.Label(controls, text="Root:", bg="#12353c", fg="#d7e8ea").pack(side="left", padx=(0, 8))
         tk.Entry(controls, textvariable=self.root_var, width=48).pack(side="left")
         tk.Button(controls, text="Refresh", width=12, command=self.refresh_runs).pack(side="left", padx=(10, 0))
+        tk.Button(controls, text="Rebuild Index", width=12, command=self.rebuild_index).pack(side="left", padx=(8, 0))
+        self.banner_toggle_button = tk.Button(controls, text="Hide Banner", width=12, command=self.toggle_banner)
+        self.banner_toggle_button.pack(side="left", padx=(8, 0))
 
-        body = tk.PanedWindow(self, orient=tk.HORIZONTAL, sashwidth=8, bg="#f3f1ea")
-        body.grid(row=1, column=0, sticky="nsew", padx=16, pady=8)
+        self.body_pane = tk.PanedWindow(self, orient=tk.HORIZONTAL, sashwidth=8, bg="#f3f1ea")
+        self.body_pane.grid(row=1, column=0, sticky="nsew", padx=16, pady=8)
 
-        left = tk.Frame(body, bg="#f3f1ea")
-        right = tk.Frame(body, bg="#f3f1ea")
-        body.add(left, stretch="always", minsize=520)
-        body.add(right, stretch="always", minsize=600)
+        self.left_panel = tk.Frame(self.body_pane, bg="#f3f1ea")
+        self.right_panel = tk.Frame(self.body_pane, bg="#f3f1ea")
+        self.body_pane.add(self.left_panel, stretch="always", minsize=520)
+        self.body_pane.add(self.right_panel, stretch="always", minsize=600)
 
-        left.columnconfigure(0, weight=1)
-        left.rowconfigure(1, weight=1)
+        self.left_panel.columnconfigure(0, weight=1)
+        self.left_panel.rowconfigure(1, weight=1)
 
-        search_box = tk.Frame(left, bg="white", padx=12, pady=12, highlightthickness=1, highlightbackground="#d8e0e1")
+        search_box = tk.Frame(self.left_panel, bg="white", padx=12, pady=12, highlightthickness=1, highlightbackground="#d8e0e1")
         search_box.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         search_box.columnconfigure(0, weight=1)
         tk.Label(search_box, text="Search", bg="white", fg="#12353c", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
@@ -449,17 +884,17 @@ class DataFilesBrowser(tk.Tk):
         self.filter_toggle_button.grid(row=0, column=1, sticky="e", padx=(8, 0))
         self.search_entry = tk.Entry(search_box, textvariable=self.search_var, font=("Segoe UI", 11))
         self.search_entry.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        self.search_var.trace_add("write", lambda *_: self.apply_filter())
+        self.search_var.trace_add("write", lambda *_: self._schedule_filter())
         self.scan_filter_row = tk.Frame(search_box, bg="white")
         self.scan_filter_row.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         tk.Label(self.scan_filter_row, text="Scan range >=", bg="white", fg="#12353c").pack(side="left")
         tk.Entry(self.scan_filter_row, textvariable=self.scan_range_min_var, width=10).pack(side="left", padx=(8, 4))
         tk.Label(self.scan_filter_row, text="mm", bg="white", fg="#62777c").pack(side="left")
-        self.scan_range_min_var.trace_add("write", lambda *_: self.apply_filter())
+        self.scan_range_min_var.trace_add("write", lambda *_: self._schedule_filter())
         tk.Button(self.scan_filter_row, text="Columns...", command=self.open_column_manager).pack(side="right")
         tk.Label(search_box, textvariable=self.count_var, bg="white", fg="#62777c").grid(row=1, column=1, rowspan=2, sticky="ne", padx=(12, 0))
 
-        table_wrap = tk.Frame(left, bg="white", highlightthickness=1, highlightbackground="#d8e0e1")
+        table_wrap = tk.Frame(self.left_panel, bg="white", highlightthickness=1, highlightbackground="#d8e0e1")
         table_wrap.grid(row=1, column=0, sticky="nsew")
         table_wrap.rowconfigure(0, weight=1)
         table_wrap.columnconfigure(0, weight=1)
@@ -477,7 +912,6 @@ class DataFilesBrowser(tk.Tk):
 
         self.tree_menu = tk.Menu(self, tearoff=0)
         self.tree_menu.add_command(label="Toggle Star", command=self.toggle_star_from_menu)
-        self.tree_menu.add_command(label="Edit Sample", command=self.edit_sample_name)
         self.tree_menu.add_command(label="Edit Metadata", command=self.edit_metadata)
         self.tree_menu.add_command(label="Open Folder", command=self.open_selected_folder)
         self.tree_menu.add_command(label="Open Image", command=self.open_selected_image)
@@ -490,10 +924,10 @@ class DataFilesBrowser(tk.Tk):
         self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.configure(xscrollcommand=xscrollbar.set)
 
-        right.columnconfigure(0, weight=1)
-        right.rowconfigure(1, weight=1)
+        self.right_panel.columnconfigure(0, weight=1)
+        self.right_panel.rowconfigure(1, weight=1)
 
-        selected_header = tk.Frame(right, bg="white", padx=14, pady=14, highlightthickness=1, highlightbackground="#d8e0e1")
+        selected_header = tk.Frame(self.right_panel, bg="white", padx=14, pady=14, highlightthickness=1, highlightbackground="#d8e0e1")
         selected_header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         selected_header.columnconfigure(0, weight=1)
         tk.Label(selected_header, text="Selected Run", bg="white", fg="#12353c", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
@@ -501,41 +935,56 @@ class DataFilesBrowser(tk.Tk):
         self.selected_title.grid(row=1, column=0, sticky="w", pady=(6, 0))
         action_frame = tk.Frame(selected_header, bg="white")
         action_frame.grid(row=0, column=1, rowspan=2, sticky="e")
-        tk.Button(action_frame, text="Edit Sample", width=12, command=self.edit_sample_name).pack(side="left", padx=(0, 8))
+        self.show_banner_button = tk.Button(action_frame, text="Show Banner", width=12, command=self.toggle_banner)
+        self.show_banner_button.pack(side="left", padx=(0, 8))
+        self.table_toggle_button = tk.Button(action_frame, text="Hide Table", width=12, command=self.toggle_table)
+        self.table_toggle_button.pack(side="left", padx=(0, 8))
         tk.Button(action_frame, text="Edit Metadata", width=12, command=self.edit_metadata).pack(side="left", padx=(0, 8))
         tk.Button(action_frame, text="Open Folder", width=12, command=self.open_selected_folder).pack(side="left", padx=(0, 8))
-        tk.Button(action_frame, text="Open Image", width=12, command=self.open_selected_image).pack(side="left", padx=(0, 8))
-        tk.Button(action_frame, text="Open MP4", width=12, command=self.open_selected_mp4).pack(side="left", padx=(0, 8))
-        tk.Button(action_frame, text="Rerun Selected", width=14, command=self.rerun_selected_analysis).pack(side="left", padx=(0, 8))
-        tk.Button(action_frame, text="Rerun Filtered", width=14, command=self.rerun_filtered_analysis).pack(side="left")
-        tk.Button(action_frame, text="Run Picked Folders", width=16, command=self.run_picked_folders).pack(side="left", padx=(8, 0))
+        tk.Button(action_frame, text="Show FFT", width=12, command=self.show_latest_fft_result).pack(side="left", padx=(0, 8))
+        tk.Button(action_frame, text="Rerun", width=12, command=self.rerun_selected_analysis).pack(side="left")
 
-        content = tk.Frame(right, bg="#f3f1ea")
+        content = tk.Frame(self.right_panel, bg="#f3f1ea")
         content.grid(row=1, column=0, sticky="nsew")
-        content.columnconfigure(0, weight=2)
+        content.columnconfigure(0, weight=1)
         content.columnconfigure(1, weight=1)
         content.rowconfigure(0, weight=1)
+        content.rowconfigure(1, weight=1)
 
-        preview_wrap = tk.Frame(content, bg="white", padx=12, pady=12, highlightthickness=1, highlightbackground="#d8e0e1")
-        preview_wrap.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        preview_wrap.rowconfigure(1, weight=1)
-        preview_wrap.columnconfigure(0, weight=1)
-        tk.Label(preview_wrap, text="final_clean_result Preview", bg="white", fg="#12353c", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
-
-        self.preview_label = tk.Label(preview_wrap, bg="#edf2f2", anchor="center")
-        self.preview_label.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
-        self.preview_label.bind("<Double-Button-1>", lambda _event: self.open_selected_mp4())
-
-        detail_wrap = tk.Frame(content, bg="#f3f1ea")
-        detail_wrap.grid(row=0, column=1, sticky="nsew")
-        detail_wrap.columnconfigure(0, weight=1)
-        detail_wrap.rowconfigure(0, weight=1)
-
-        std_wrap = tk.Frame(detail_wrap, bg="white", padx=12, pady=12, highlightthickness=1, highlightbackground="#d8e0e1")
-        std_wrap.grid(row=0, column=0, sticky="nsew")
-        tk.Label(std_wrap, text="Std Evolution Preview", bg="white", fg="#12353c", font=("Segoe UI", 12, "bold")).pack(anchor="w")
-        self.std_preview_label = tk.Label(std_wrap, bg="#edf2f2", anchor="center")
-        self.std_preview_label.pack(fill="both", expand=True, pady=(10, 0))
+        self.preview_label = self._build_preview_card(
+            content,
+            row=0,
+            column=0,
+            title="Final Result",
+            open_handler=lambda: self.open_selected_image(),
+        )
+        self.loglog_preview_label = self._build_preview_card(
+            content,
+            row=0,
+            column=1,
+            title="Log-Log Eval",
+            open_handler=lambda: self.open_selected_asset("loglog_plot_path", "loglog_eval.png"),
+        )
+        self.diagonal_preview_label = self._build_preview_card(
+            content,
+            row=1,
+            column=0,
+            title="Diagonal Offset",
+            open_handler=lambda: self.open_selected_asset(
+                "diagonal_offset_path",
+                "diagonal_offset_matrix_urad2.png or diagonal_offset_matrix_V2.png",
+            ),
+        )
+        self.std_preview_label = self._build_preview_card(
+            content,
+            row=1,
+            column=1,
+            title="Raw Std Over Time",
+            open_handler=lambda: self.open_selected_asset(
+                "raw_std_plot_path",
+                "raw_std_over_time.png or raw_std_within_parity.png",
+            ),
+        )
 
         status = tk.Label(self, textvariable=self.status_var, bg="#f3f1ea", fg="#5a6e73", anchor="w")
         status.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 12))
@@ -545,6 +994,8 @@ class DataFilesBrowser(tk.Tk):
             self.scan_filter_row.grid_remove()
             self.filter_toggle_button.configure(text="Show Filters")
 
+        self._apply_layout_visibility()
+
     def refresh_runs(self) -> None:
         self.save_config()
         root_path = Path(self.root_var.get().strip())
@@ -552,19 +1003,78 @@ class DataFilesBrowser(tk.Tk):
             messagebox.showwarning("Missing Folder", f"Folder not found:\n{root_path}")
             return
 
-        self.status_var.set("Scanning runs...")
+        self._current_root_path = root_path
+        self.status_var.set("Loading runs from index...")
         self.update_idletasks()
         try:
-            self.all_runs = scan_runs(root_path)
+            runs = load_runs_from_db(root_path)
         except Exception as exc:
-            messagebox.showerror("Scan Error", str(exc))
-            self.status_var.set("Scan failed.")
+            messagebox.showerror("Index Error", str(exc))
+            self.status_var.set("Index load failed.")
             return
 
-        self.apply_filter()
-        self.status_var.set(f"Loaded {len(self.all_runs)} runs with {FINAL_RESULT_NAME}.")
+        if runs:
+            self.all_runs = runs
+            self._schedule_filter(immediate=True)
+            self.status_var.set(f"Loaded {len(runs)} runs from the SQLite index.")
+            return
+
+        self.status_var.set("No index found for this root. Building index...")
+        self.rebuild_index()
+
+    def rebuild_index(self) -> None:
+        self.save_config()
+        root_path = Path(self.root_var.get().strip())
+        if not root_path.exists():
+            messagebox.showwarning("Missing Folder", f"Folder not found:\n{root_path}")
+            return
+
+        self._current_root_path = root_path
+        self._scan_request_id += 1
+        request_id = self._scan_request_id
+        self.status_var.set("Rebuilding SQLite index...")
+        self.update_idletasks()
+
+        def worker() -> None:
+            try:
+                runs = scan_runs(root_path)
+                write_runs_to_db(root_path, runs)
+                self.after(0, lambda: self._finish_refresh_runs(request_id, runs, None))
+            except Exception as exc:
+                self.after(0, lambda: self._finish_refresh_runs(request_id, None, exc))
+
+        self._scan_thread = threading.Thread(target=worker, daemon=True)
+        self._scan_thread.start()
+
+    def _finish_refresh_runs(
+        self,
+        request_id: int,
+        runs: list[RunRecord] | None,
+        error: Exception | None,
+    ) -> None:
+        if request_id != self._scan_request_id:
+            return
+
+        if error is not None:
+            messagebox.showerror("Index Error", str(error))
+            self.status_var.set("Index build failed.")
+            return
+
+        self.all_runs = runs or []
+        self._schedule_filter(immediate=True)
+        self.status_var.set(f"Indexed {len(self.all_runs)} runs and loaded them from SQLite.")
+
+    def _schedule_filter(self, immediate: bool = False) -> None:
+        if self._filter_job is not None:
+            self.after_cancel(self._filter_job)
+            self._filter_job = None
+        if immediate:
+            self.apply_filter()
+            return
+        self._filter_job = self.after(FILTER_DEBOUNCE_MS, self.apply_filter)
 
     def apply_filter(self) -> None:
+        self._filter_job = None
         query = self.search_var.get().strip().lower()
         tokens = [token for token in query.split() if token]
         min_range = self._parse_optional_float(self.scan_range_min_var.get())
@@ -715,20 +1225,81 @@ class DataFilesBrowser(tk.Tk):
         self.active_run = run
         summary = run.sample or "Unknown sample"
         self.selected_title.configure(text=f"{summary}   {run.sortable_date.strftime('%Y-%m-%d %H:%M')}")
-        self._set_image_preview(self.preview_label, run.final_result_path, (780, 620), "Image not found")
+        self.update_idletasks()
+        self._set_image_preview(
+            self.preview_label,
+            run.final_result_path,
+            self._preview_max_size(self.preview_label),
+            "No final_clean_result.png found.",
+        )
+        self._set_image_preview(
+            self.loglog_preview_label,
+            run.loglog_plot_path,
+            self._preview_max_size(self.loglog_preview_label),
+            "No loglog_eval.png found.\nRerun analysis for this run.",
+        )
+        self._set_image_preview(
+            self.diagonal_preview_label,
+            run.diagonal_offset_path,
+            self._preview_max_size(self.diagonal_preview_label),
+            "No diagonal offset plot found.\nExpected diagonal_offset_matrix_urad2.png or diagonal_offset_matrix_V2.png.",
+        )
         self._set_image_preview(
             self.std_preview_label,
-            run.std_plot_path,
-            (720, 620),
-            "No raw_std_within_parity.png found.\nRerun analysis for this run.",
+            run.raw_std_plot_path,
+            self._preview_max_size(self.std_preview_label),
+            "No raw std plot found.\nExpected raw_std_over_time.png or raw_std_within_parity.png.",
         )
 
     def clear_selection(self) -> None:
         self.active_run = None
         self.selected_title.configure(text="Nothing selected")
-        self.preview_label.configure(image="", text="")
-        self.std_preview_label.configure(image="", text="Select a run to preview std evolution.")
-        self.preview_image = None
+        self._clear_preview_label(self.preview_label, "Select a run to preview the final result.")
+        self._clear_preview_label(self.loglog_preview_label, "Select a run to preview the log-log evaluation.")
+        self._clear_preview_label(self.diagonal_preview_label, "Select a run to preview the diagonal offset plot.")
+        self._clear_preview_label(self.std_preview_label, "Select a run to preview the raw std plot.")
+        self.preview_images.clear()
+
+    def _build_preview_card(
+        self,
+        parent: tk.Widget,
+        row: int,
+        column: int,
+        title: str,
+        open_handler: callable,
+    ) -> tk.Label:
+        card = tk.Frame(parent, bg="white", padx=12, pady=12, highlightthickness=1, highlightbackground="#d8e0e1")
+        card.grid(row=row, column=column, sticky="nsew", padx=(0 if column == 0 else 5, 0), pady=(0 if row == 0 else 5, 0))
+        card.grid_rowconfigure(1, weight=1)
+        card.grid_columnconfigure(0, weight=1)
+
+        tk.Label(card, text=title, bg="white", fg="#12353c", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
+        label = tk.Label(card, bg="#edf2f2", anchor="center")
+        label.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        label.bind("<Double-Button-1>", lambda _event: open_handler())
+        return label
+
+    def _clear_preview_label(self, label: tk.Label, text: str) -> None:
+        label.configure(image="", text=text)
+        label.image = None
+
+    def _preview_max_size(self, label: tk.Label) -> tuple[int, int]:
+        width = max(240, label.winfo_width() - 12)
+        height = max(180, label.winfo_height() - 12)
+        return width, height
+
+    def _on_window_configure(self, _event: tk.Event[tk.Widget]) -> None:
+        if self.active_run is None:
+            return
+        if self._preview_resize_job is not None:
+            self.after_cancel(self._preview_resize_job)
+        self._preview_resize_job = self.after(PREVIEW_RESIZE_DEBOUNCE_MS, self._refresh_active_previews)
+
+    def _refresh_active_previews(self) -> None:
+        self._preview_resize_job = None
+        if self.active_run is None:
+            return
+        self.show_run(self.active_run)
 
     def _set_image_preview(
         self,
@@ -739,17 +1310,27 @@ class DataFilesBrowser(tk.Tk):
     ) -> None:
         if image_path is None or not image_path.exists():
             label.configure(image="", text=missing_text)
-            if label is self.preview_label:
-                self.preview_image = None
-            else:
-                label.image = None
+            label.image = None
+            self.preview_images.pop(label, None)
             return
 
         try:
             if Image is not None and ImageTk is not None:
-                image = Image.open(image_path)
-                image.thumbnail(max_size)
-                photo = ImageTk.PhotoImage(image)
+                source_key = str(image_path)
+                bucketed_size = self._bucket_preview_size(max_size)
+                cache_key = (source_key, bucketed_size[0], bucketed_size[1])
+                photo = self._preview_photo_cache.get(cache_key)
+                if photo is None:
+                    source_image = self._preview_source_cache.get(source_key)
+                    if source_image is None:
+                        with Image.open(image_path) as opened_image:
+                            source_image = opened_image.copy()
+                        self._preview_source_cache[source_key] = source_image
+                    image = source_image.copy()
+                    image.thumbnail(bucketed_size)
+                    photo = ImageTk.PhotoImage(image)
+                    self._preview_photo_cache[cache_key] = photo
+                    self._trim_preview_cache()
             else:
                 photo = tk.PhotoImage(file=str(image_path))
                 max_dim = max(max_size)
@@ -758,14 +1339,22 @@ class DataFilesBrowser(tk.Tk):
 
             label.configure(image=photo, text="")
             label.image = photo
-            if label is self.preview_label:
-                self.preview_image = photo
+            self.preview_images[label] = photo
         except Exception as exc:
             label.configure(image="", text=f"Preview unavailable:\n{exc}")
-            if label is self.preview_label:
-                self.preview_image = None
-            else:
-                label.image = None
+            label.image = None
+            self.preview_images.pop(label, None)
+
+    @staticmethod
+    def _bucket_preview_size(max_size: tuple[int, int]) -> tuple[int, int]:
+        width = max(PREVIEW_SIZE_BUCKET_PX, ((max_size[0] + PREVIEW_SIZE_BUCKET_PX - 1) // PREVIEW_SIZE_BUCKET_PX) * PREVIEW_SIZE_BUCKET_PX)
+        height = max(PREVIEW_SIZE_BUCKET_PX, ((max_size[1] + PREVIEW_SIZE_BUCKET_PX - 1) // PREVIEW_SIZE_BUCKET_PX) * PREVIEW_SIZE_BUCKET_PX)
+        return width, height
+
+    def _trim_preview_cache(self) -> None:
+        while len(self._preview_photo_cache) > PREVIEW_CACHE_LIMIT:
+            oldest_key = next(iter(self._preview_photo_cache))
+            del self._preview_photo_cache[oldest_key]
 
     @staticmethod
     def _format_number(value: float | None) -> str:
@@ -826,65 +1415,6 @@ class DataFilesBrowser(tk.Tk):
                 self.filtered_runs[index] = updated_run
                 break
 
-    def edit_sample_name(self) -> None:
-        run = self._selected_run()
-        if run is None:
-            return
-
-        dialog = tk.Toplevel(self)
-        dialog.title("Edit Sample")
-        dialog.transient(self)
-        dialog.grab_set()
-        dialog.configure(bg="#f3f1ea")
-        dialog.resizable(False, False)
-
-        tk.Label(
-            dialog,
-            text="Choose or type a sample name:",
-            bg="#f3f1ea",
-            fg="#12353c",
-        ).grid(row=0, column=0, sticky="w", padx=12, pady=(12, 8))
-
-        sample_options = sorted({loaded_run.sample for loaded_run in self.all_runs if loaded_run.sample})
-        if run.sample and run.sample not in sample_options:
-            sample_options.insert(0, run.sample)
-
-        sample_var = tk.StringVar(value=run.sample)
-        sample_box = ttk.Combobox(
-            dialog,
-            textvariable=sample_var,
-            values=sample_options,
-            state="normal",
-            width=36,
-        )
-        sample_box.grid(row=1, column=0, sticky="ew", padx=12)
-        sample_box.focus_set()
-        sample_box.icursor(tk.END)
-
-        chosen_sample: dict[str, str | None] = {"value": None}
-
-        def submit() -> None:
-            chosen_sample["value"] = sample_var.get().strip()
-            dialog.destroy()
-
-        def cancel() -> None:
-            dialog.destroy()
-
-        button_row = tk.Frame(dialog, bg="#f3f1ea")
-        button_row.grid(row=2, column=0, sticky="e", padx=12, pady=12)
-        tk.Button(button_row, text="Save", width=10, command=submit).pack(side="left", padx=(0, 8))
-        tk.Button(button_row, text="Cancel", width=10, command=cancel).pack(side="left")
-
-        dialog.columnconfigure(0, weight=1)
-        dialog.bind("<Return>", lambda _event: submit())
-        dialog.bind("<Escape>", lambda _event: cancel())
-        self.wait_window(dialog)
-
-        new_sample = chosen_sample["value"]
-        if new_sample is None:
-            return
-        self.set_sample_name(run, new_sample)
-
     def edit_metadata(self) -> None:
         run = self._selected_run()
         if run is None:
@@ -920,11 +1450,28 @@ class DataFilesBrowser(tk.Tk):
         ]
 
         entry_vars: dict[str, tk.StringVar] = {}
+        sample_box: ttk.Combobox | None = None
         for row, (label_text, key, initial_value) in enumerate(fields):
             tk.Label(container, text=label_text, bg="#f3f1ea", fg="#12353c").grid(row=row, column=0, sticky="w", pady=4)
             normalized = "" if initial_value == "-" else initial_value
             entry_vars[key] = tk.StringVar(value=normalized)
-            tk.Entry(container, textvariable=entry_vars[key]).grid(row=row, column=1, sticky="ew", padx=(10, 0), pady=4)
+            if key == "sample":
+                sample_options = sorted({loaded_run.sample for loaded_run in self.all_runs if loaded_run.sample})
+                if run.sample and run.sample not in sample_options:
+                    sample_options.insert(0, run.sample)
+                sample_box = ttk.Combobox(
+                    container,
+                    textvariable=entry_vars[key],
+                    values=sample_options,
+                    state="normal",
+                )
+                sample_box.grid(row=row, column=1, sticky="ew", padx=(10, 0), pady=4)
+            else:
+                tk.Entry(container, textvariable=entry_vars[key]).grid(row=row, column=1, sticky="ew", padx=(10, 0), pady=4)
+
+        if sample_box is not None:
+            sample_box.focus_set()
+            sample_box.icursor(tk.END)
 
         star_var = tk.BooleanVar(value=run.star_measurement)
         tk.Checkbutton(
@@ -962,6 +1509,7 @@ class DataFilesBrowser(tk.Tk):
 
                 self._write_metadata_payload(run, payload)
                 updated_run = load_run_record(run.final_result_path)
+                upsert_run_record_in_db(self._current_root_path, updated_run)
                 self._replace_run_record(updated_run)
                 self._refresh_search_blob(updated_run)
                 self.apply_filter()
@@ -980,25 +1528,6 @@ class DataFilesBrowser(tk.Tk):
         tk.Button(button_row, text="Save", width=10, command=save).pack(side="left", padx=(0, 8))
         tk.Button(button_row, text="Cancel", width=10, command=dialog.destroy).pack(side="left")
 
-    def set_sample_name(self, run: RunRecord, new_sample: str) -> None:
-        try:
-            selected_iid = str(run.folder_path)
-            payload = self._load_or_create_metadata_payload(run)
-            payload["Sample"] = new_sample
-            self._write_metadata_payload(run, payload)
-            updated_run = load_run_record(run.final_result_path)
-            self._replace_run_record(updated_run)
-            self._refresh_search_blob(updated_run)
-            self.apply_filter()
-            if self.tree.exists(selected_iid):
-                self.tree.selection_set(selected_iid)
-                self.tree.focus(selected_iid)
-                self.show_run(updated_run)
-            self.status_var.set(f"Updated sample for {updated_run.folder_name}.")
-            self.save_config()
-        except Exception as exc:
-            messagebox.showerror("Sample Update Failed", f"Could not update metadata.json:\n{exc}")
-
     def set_star_measurement(self, run: RunRecord, new_value: bool) -> None:
         try:
             selected_iid = str(run.folder_path)
@@ -1006,6 +1535,7 @@ class DataFilesBrowser(tk.Tk):
             payload["StarMeasurement"] = new_value
             self._write_metadata_payload(run, payload)
             updated_run = load_run_record(run.final_result_path)
+            upsert_run_record_in_db(self._current_root_path, updated_run)
             self._replace_run_record(updated_run)
             self._refresh_search_blob(updated_run)
             self.apply_filter()
@@ -1049,6 +1579,43 @@ class DataFilesBrowser(tk.Tk):
             self.scan_filter_row.grid_remove()
             self.filter_toggle_button.configure(text="Show Filters")
         self.save_config()
+
+    def toggle_banner(self) -> None:
+        self.banner_visible = not self.banner_visible
+        self._apply_layout_visibility()
+        self.save_config()
+
+    def toggle_table(self) -> None:
+        self.table_visible = not self.table_visible
+        self._apply_layout_visibility()
+        self.save_config()
+
+    def _apply_layout_visibility(self) -> None:
+        if self.banner_visible:
+            self.header_frame.grid()
+            self.banner_toggle_button.configure(text="Hide Banner")
+            self.show_banner_button.pack_forget()
+        else:
+            self.header_frame.grid_remove()
+            self.banner_toggle_button.configure(text="Show Banner")
+            if not self.show_banner_button.winfo_manager():
+                self.show_banner_button.pack(side="left", padx=(0, 8), before=self.table_toggle_button)
+
+        panes = self.body_pane.panes()
+        left_widget = str(self.left_panel)
+        right_widget = str(self.right_panel)
+        if self.table_visible:
+            self.table_toggle_button.configure(text="Hide Table")
+            if left_widget not in panes:
+                self.body_pane.add(self.left_panel, before=self.right_panel, stretch="always", minsize=520)
+            if right_widget not in self.body_pane.panes():
+                self.body_pane.add(self.right_panel, stretch="always", minsize=600)
+        else:
+            self.table_toggle_button.configure(text="Show Table")
+            if left_widget in panes:
+                self.body_pane.forget(self.left_panel)
+
+        self.after_idle(self._refresh_active_previews)
 
     def open_column_manager(self) -> None:
         dialog = tk.Toplevel(self)
@@ -1133,6 +1700,18 @@ class DataFilesBrowser(tk.Tk):
         else:
             messagebox.showwarning("Missing Image", f"Could not find:\n{run.final_result_path}")
 
+    def open_selected_asset(self, attr_name: str, expected_name: str) -> None:
+        run = self._selected_run()
+        if run is None:
+            return
+
+        image_path = getattr(run, attr_name, None)
+        if isinstance(image_path, Path) and image_path.exists():
+            os.startfile(image_path)  # type: ignore[attr-defined]
+            return
+
+        messagebox.showwarning("Missing Image", f"Could not find:\n{run.folder_path / expected_name}")
+
     def open_selected_mp4(self) -> None:
         run = self._selected_run()
         if run is None:
@@ -1141,6 +1720,19 @@ class DataFilesBrowser(tk.Tk):
             os.startfile(run.movie_path)  # type: ignore[attr-defined]
         else:
             messagebox.showwarning("Missing MP4", f"Could not find:\n{run.folder_path / MOVIE_NAME}")
+
+    def show_latest_fft_result(self) -> None:
+        def worker() -> None:
+            try:
+                image_path = build_fft_spectrum_plot(FFT_DEFAULT_OUTPUT_DIR, open_image=True)
+            except Exception as exc:
+                self.after(0, lambda: messagebox.showerror("FFT Plot Failed", str(exc)))
+                self.after(0, lambda: self.status_var.set("FFT plot failed."))
+                return
+            self.after(0, lambda: self.status_var.set(f"Opened FFT spectrum: {image_path}"))
+
+        self.status_var.set("Building FFT spectrum from latest FFT output...")
+        threading.Thread(target=worker, daemon=True).start()
 
     def rerun_selected_analysis(self) -> None:
         run = self._selected_run()
@@ -1155,38 +1747,6 @@ class DataFilesBrowser(tk.Tk):
             return
         folder_paths = [run.folder_path for run in self.filtered_runs]
         self._start_analysis(folder_paths, f"{len(folder_paths)} filtered runs")
-
-    def run_picked_folders(self) -> None:
-        folder_paths = self._pick_folder_paths()
-        if not folder_paths:
-            return
-        self._start_analysis(folder_paths, f"{len(folder_paths)} picked folders")
-
-    def _pick_folder_paths(self) -> list[Path]:
-        picked_paths: list[Path] = []
-        initial_dir = self.root_var.get().strip() or str(ROOT_DEFAULT)
-
-        while True:
-            selected = filedialog.askdirectory(
-                title="Select a Run Folder for cm_pipeline_all_in_one",
-                initialdir=initial_dir,
-            )
-            if not selected:
-                break
-
-            selected_path = Path(selected)
-            if selected_path not in picked_paths:
-                picked_paths.append(selected_path)
-            initial_dir = str(selected_path.parent)
-
-            add_more = messagebox.askyesno(
-                "Add Another Folder",
-                f"Added:\n{selected_path}\n\nDo you want to add another folder?",
-            )
-            if not add_more:
-                break
-
-        return picked_paths
 
     def _start_analysis(self, folder_paths: list[Path], label: str) -> None:
         if self.analysis_thread is not None and self.analysis_thread.is_alive():
@@ -1254,7 +1814,14 @@ class DataFilesBrowser(tk.Tk):
     def _handle_analysis_complete(self, success: bool, label: str, message: str) -> None:
         if success:
             self.status_var.set(f"Finished analysis for {label}.")
-            self.refresh_runs()
+            self.rebuild_index()
+            try:
+                fft_dir = find_fft_output_dir(FFT_DEFAULT_OUTPUT_DIR)
+                if any((fft_dir / f"{stem}.bin").is_file() for _, stem in FFT_CHANNEL_FILES):
+                    image_path = build_fft_spectrum_plot(fft_dir, open_image=True)
+                    message = f"{message}\n\nFFT spectrum opened:\n{image_path}"
+            except Exception:
+                pass
             messagebox.showinfo("Analysis Complete", message)
             return
 
@@ -1263,5 +1830,15 @@ class DataFilesBrowser(tk.Tk):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) >= 2 and sys.argv[1] == "--show-fft":
+        requested_dir = Path(sys.argv[2]) if len(sys.argv) >= 3 else FFT_DEFAULT_OUTPUT_DIR
+        try:
+            image_path = build_fft_spectrum_plot(requested_dir, open_image=True)
+        except Exception as exc:
+            print(f"FFT plot failed: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"FFT spectrum saved to {image_path}")
+        raise SystemExit(0)
+
     app = DataFilesBrowser()
     app.mainloop()

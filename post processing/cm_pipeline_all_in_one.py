@@ -255,6 +255,37 @@ def scale_to_urad2(values: np.ndarray, conversion_factor: float) -> np.ndarray:
     return (values / cf) * 1e12
 
 
+def is_dark_noise_run(meta: Meta) -> bool:
+    finite_powers = [value for value in (meta.p1_mw, meta.p2_mw) if np.isfinite(value)]
+    total_power_mw = float(np.sum(finite_powers)) if finite_powers else 0.0
+    invalid_conversion = (not np.isfinite(meta.conversion_factor)) or meta.conversion_factor <= 0
+    very_low_power = total_power_mw <= 0.05
+    return invalid_conversion or very_low_power or use_v2_for_shot_noise(meta)
+
+
+def scale_for_display(values: np.ndarray, conversion_factor: float, display_in_v2: bool) -> np.ndarray:
+    if display_in_v2:
+        return values
+    return scale_to_urad2(values, conversion_factor)
+
+
+def amplitude_unit_label(display_in_v2: bool) -> str:
+    return "V^2" if display_in_v2 else r"$\mu rad^2$"
+
+
+def amplitude_axis_label(display_in_v2: bool) -> str:
+    return f"Amplitude ({amplitude_unit_label(display_in_v2)})"
+
+
+def running_mean_axis_label(display_in_v2: bool, use_abs: bool = True) -> str:
+    prefix = "|Running Mean|" if use_abs else "Running Mean"
+    return f"{prefix} ({amplitude_unit_label(display_in_v2)})"
+
+
+def delta_axis_label(display_in_v2: bool) -> str:
+    return f"$\\Delta$ amplitude ({amplitude_unit_label(display_in_v2)})"
+
+
 def use_v2_for_shot_noise(meta: Meta) -> bool:
     return bool(
         np.isfinite(meta.shot_noise_result) and meta.shot_noise_result > SHOT_NOISE_RESULT_V2_THRESHOLD
@@ -398,6 +429,60 @@ def style_matplotlib() -> None:
     )
 
 
+def figure_provenance_text(run_folder: Path, extra: str | None = None) -> str:
+    run_path = run_folder.resolve(strict=False)
+    cm_path = run_folder / "cm.bin"
+    parts = [f"Run folder: {run_path}"]
+
+    if cm_path.is_file():
+        stat = cm_path.stat()
+        modified = datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds")
+        parts.append(f"Raw: cm.bin | bytes={stat.st_size} | modified={modified}")
+    else:
+        parts.append("Raw: cm.bin not found")
+
+    if extra:
+        parts.append(extra)
+
+    return " | ".join(parts)
+
+
+def figure_provenance_metadata(run_folder: Path, extra: str | None = None) -> dict[str, str]:
+    cm_path = run_folder / "cm.bin"
+    metadata = {
+        "SourceRunFolder": str(run_folder.resolve(strict=False)),
+        "SourceRawFile": str(cm_path.resolve(strict=False)),
+        "Provenance": figure_provenance_text(run_folder, extra),
+    }
+    if cm_path.is_file():
+        stat = cm_path.stat()
+        metadata["SourceRawBytes"] = str(stat.st_size)
+        metadata["SourceRawModified"] = datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds")
+    if extra:
+        metadata["SourceExtra"] = extra
+    return metadata
+
+
+def save_figure_with_provenance(
+    fig: plt.Figure,
+    output_path: Path,
+    run_folder: Path,
+    extra: str | None = None,
+) -> None:
+    fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.09))
+    fig.text(
+        0.005,
+        0.006,
+        figure_provenance_text(run_folder, extra),
+        ha="left",
+        va="bottom",
+        fontsize=6,
+        color="#555555",
+        wrap=True,
+    )
+    fig.savefig(output_path, metadata=figure_provenance_metadata(run_folder, extra))
+
+
 def save_variance_gating_check(run_folder: Path, frame_rms: np.ndarray, cutoff: float) -> None:
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.hist(frame_rms, bins=100, color="#3d6ea8")
@@ -407,7 +492,7 @@ def save_variance_gating_check(run_folder: Path, frame_rms: np.ndarray, cutoff: 
     ax.set_title("Distribution of Frame Energy (Auto-Threshold)")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(run_folder / "variance_gating_check.png")
+    save_figure_with_provenance(fig, run_folder / "variance_gating_check.png", run_folder)
     plt.close(fig)
 
 
@@ -416,7 +501,7 @@ def save_histogram(run_folder: Path, x: np.ndarray) -> None:
     ax.hist(x, bins=80, color="#4b6cb7")
     ax.set_title("Ch(1,1) Amplitude (Raw)")
     fig.tight_layout()
-    fig.savefig(run_folder / "hist_ch11_amplitude_V2.png")
+    save_figure_with_provenance(fig, run_folder / "hist_ch11_amplitude_V2.png", run_folder)
     plt.close(fig)
 
 
@@ -456,7 +541,7 @@ def save_raw_std_analysis(run_folder: Path, raw_cm: np.ndarray, t_seconds: np.nd
     ax.grid(True, alpha=0.25)
     ax.legend(frameon=False)
     fig.tight_layout()
-    fig.savefig(run_folder / "raw_std_over_time.png")
+    save_figure_with_provenance(fig, run_folder / "raw_std_over_time.png", run_folder)
     plt.close(fig)
 
 
@@ -555,7 +640,12 @@ def save_frame_review_images(review_dir: Path, raw_cm: np.ndarray, start_idx: in
                 ax.text(col, row, f"{matrix[row, col]:.0f}", ha="center", va="center", fontsize=7, color="black")
         fig.colorbar(im, ax=ax, shrink=0.88, label="Raw value")
         fig.tight_layout()
-        fig.savefig(frames_dir / f"frame_{frame_idx:04d}.png")
+        save_figure_with_provenance(
+            fig,
+            frames_dir / f"frame_{frame_idx:04d}.png",
+            review_dir.parent,
+            extra=f"frame_index={frame_idx}; frame_number_1based={frame_idx + 1}",
+        )
         plt.close(fig)
 
 
@@ -590,7 +680,7 @@ def save_frame_review_contact_sheet(review_dir: Path, raw_cm: np.ndarray, start_
 
     fig.suptitle("Raw Matrix Contact Sheet", fontsize=16)
     fig.tight_layout()
-    fig.savefig(review_dir / "raw_matrix_contact_sheet.png")
+    save_figure_with_provenance(fig, review_dir / "raw_matrix_contact_sheet.png", review_dir.parent)
     plt.close(fig)
 
 
@@ -631,7 +721,7 @@ def save_frames_per_position(run_folder: Path, bin_vals: np.ndarray, counts: np.
     ax.set_ylabel("Frame Count")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(run_folder / "frames_per_position_hist.png")
+    save_figure_with_provenance(fig, run_folder / "frames_per_position_hist.png", run_folder)
     plt.close(fig)
 
 
@@ -640,6 +730,7 @@ def build_bin_cumsums_and_counts(
     inverse: np.ndarray,
     valid_indices: np.ndarray,
     conversion_factor: float,
+    display_in_v2: bool,
 ) -> tuple[list[np.ndarray], np.ndarray]:
     bin_cumsums: list[np.ndarray] = []
     counts = np.zeros(valid_indices.size, dtype=int)
@@ -649,20 +740,21 @@ def build_bin_cumsums_and_counts(
         if members.size == 0:
             bin_cumsums.append(np.empty((0, pair_diffs.shape[1]), dtype=float))
             continue
-        bin_cumsums.append(scale_to_urad2(np.cumsum(members, axis=0), conversion_factor))
+        bin_cumsums.append(scale_for_display(np.cumsum(members, axis=0), conversion_factor, display_in_v2))
     return bin_cumsums, counts
 
 
 def save_all_pairs_plot(
     run_folder: Path, ts: np.ndarray, amps: np.ndarray, pair_labels_list: list[str], meta: Meta, kmin: int
 ) -> None:
+    display_in_v2 = is_dark_noise_run(meta)
     fig, ax = plt.subplots(figsize=(16, 9))
     colors = plt.cm.turbo(np.linspace(0, 1, amps.shape[1]))
     for idx, label in enumerate(pair_labels_list):
         ax.plot(ts, amps[:, idx], "-o", color=colors[idx], linewidth=1.0, markersize=4, label=label)
 
     ax.set_xlabel("Delay (ps)")
-    ax.set_ylabel(r"Amplitude ($\mu rad^2$)")
+    ax.set_ylabel(amplitude_axis_label(display_in_v2))
     shot_noise_unit = "V^2" if use_v2_for_shot_noise(meta) else r"$\mu rad^2$"
     title_lines = [
         f"ALL Pairs Result at k={kmin}",
@@ -681,7 +773,7 @@ def save_all_pairs_plot(
             bbox=dict(facecolor="white", edgecolor="black"),
         )
     fig.tight_layout()
-    fig.savefig(run_folder / "final_result_ALL_PAIRS.png")
+    save_figure_with_provenance(fig, run_folder / "final_result_ALL_PAIRS.png", run_folder)
     plt.close(fig)
 
 
@@ -692,6 +784,7 @@ def save_selected_pairs_plot(
     pair_labels_list: list[str],
     keep_indices: list[int],
     acquisition_time_s: float,
+    display_in_v2: bool,
 ) -> None:
     if not keep_indices:
         keep_indices = list(range(min(CRITICAL_PAIR_MAX_COUNT, len(pair_labels_list))))
@@ -701,11 +794,11 @@ def save_selected_pairs_plot(
         ax.plot(ts, amps[:, idx], "o-", linewidth=1.8, markersize=4, label=pair_labels_list[idx])
 
     ax.set_xlabel("Delay (ps)")
-    ax.set_ylabel(r"Amplitude ($\mu rad^2$)")
+    ax.set_ylabel(amplitude_axis_label(display_in_v2))
     ax.set_title(f"Critical Pairs Summary | Acquisition: {acquisition_time_s:.2f} s")
     ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
     fig.tight_layout()
-    fig.savefig(run_folder / "final_clean_result.png")
+    save_figure_with_provenance(fig, run_folder / "final_clean_result.png", run_folder)
     plt.close(fig)
 
 
@@ -717,6 +810,7 @@ def save_loglog_eval(
     labels: list[str],
     conversion_factor: float,
     keep_indices: list[int],
+    display_in_v2: bool,
 ) -> None:
     if not keep_indices:
         keep_indices = list(range(min(CRITICAL_PAIR_MAX_COUNT, len(labels))))
@@ -728,7 +822,7 @@ def save_loglog_eval(
     diffs = cm[:, pair_i1] - cm[:, pair_i2]
     divisors = np.arange(1, len(time_tail) + 1, dtype=float)[:, None]
     run_means = np.cumsum(diffs, axis=0) / divisors
-    yvals = np.abs(scale_to_urad2(run_means, conversion_factor))
+    yvals = np.abs(scale_for_display(run_means, conversion_factor, display_in_v2))
     yvals[yvals <= 0] = np.nan
 
     fig, ax = plt.subplots(figsize=(9, 6.5))
@@ -737,10 +831,10 @@ def save_loglog_eval(
         ax.loglog(xvals, yvals[:, col_idx], label=labels[pair_idx])
     ax.set_title("Log-Log Evaluation (Cleaned)")
     ax.set_xlabel("Time (s)")
-    ax.set_ylabel(r"|Running Mean| ($\mu rad^2$)")
+    ax.set_ylabel(running_mean_axis_label(display_in_v2, use_abs=True))
     ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
     fig.tight_layout()
-    fig.savefig(run_folder / "loglog_eval.png")
+    save_figure_with_provenance(fig, run_folder / "loglog_eval.png", run_folder)
     plt.close(fig)
 
 
@@ -774,7 +868,7 @@ def save_heatmaps(run_folder: Path, cm: np.ndarray, conversion_factor: float) ->
         ax.set_title(title)
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     fig.tight_layout()
-    fig.savefig(run_folder / "matrix_pattern_heatmaps.png")
+    save_figure_with_provenance(fig, run_folder / "matrix_pattern_heatmaps.png", run_folder)
     plt.close(fig)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -785,7 +879,7 @@ def save_heatmaps(run_folder: Path, cm: np.ndarray, conversion_factor: float) ->
     axes[1].set_title("MSE Corr (V^4)")
     fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
     fig.tight_layout()
-    fig.savefig(run_folder / "combined_heatmap_V2.png")
+    save_figure_with_provenance(fig, run_folder / "combined_heatmap_V2.png", run_folder)
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(6, 5))
@@ -793,7 +887,7 @@ def save_heatmaps(run_folder: Path, cm: np.ndarray, conversion_factor: float) ->
     ax.set_title(r"Mean Corr ($\mu rad^2$)")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     fig.tight_layout()
-    fig.savefig(run_folder / "heatmap_mean_urad2.png")
+    save_figure_with_provenance(fig, run_folder / "heatmap_mean_urad2.png", run_folder)
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(6, 5))
@@ -801,7 +895,7 @@ def save_heatmaps(run_folder: Path, cm: np.ndarray, conversion_factor: float) ->
     ax.set_title("Diagonal Tail-Offset (V^2)")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     fig.tight_layout()
-    fig.savefig(run_folder / "diagonal_offset_matrix_V2.png")
+    save_figure_with_provenance(fig, run_folder / "diagonal_offset_matrix_V2.png", run_folder)
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(6, 5))
@@ -809,34 +903,36 @@ def save_heatmaps(run_folder: Path, cm: np.ndarray, conversion_factor: float) ->
     ax.set_title(r"Diagonal Tail-Offset ($\mu rad^2$)")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     fig.tight_layout()
-    fig.savefig(run_folder / "diagonal_offset_matrix_urad2.png")
+    save_figure_with_provenance(fig, run_folder / "diagonal_offset_matrix_urad2.png", run_folder)
     plt.close(fig)
 
 
-def save_semilogy_grouped_64channels(run_folder: Path, cm: np.ndarray, conversion_factor: float) -> None:
+def save_semilogy_grouped_64channels(
+    run_folder: Path,
+    cm: np.ndarray,
+    conversion_factor: float,
+    display_in_v2: bool,
+) -> None:
     n_frames = cm.shape[0]
     xvals = np.arange(1, n_frames + 1, dtype=float) * FRAME_DT_S
     acu_sums_64 = np.cumsum(cm, axis=0) / np.arange(1, n_frames + 1)[:, None]
 
-    for suffix, transform, ylabel in [
-        ("V2", lambda x: np.abs(x), "Abs Running Mean (V^2)"),
-        ("urad2", lambda x: np.abs(scale_to_urad2(x, conversion_factor)), r"Abs Running Mean ($\mu rad^2$)"),
-    ]:
-        fig, axes = plt.subplots(2, 4, figsize=(16, 9))
-        for row in range(8):
-            ax = axes.flat[row]
-            for col in range(8):
-                idx = row * 8 + col
-                yvals = transform(acu_sums_64[:, idx])
-                yvals[yvals <= 0] = np.nan
-                ax.semilogy(xvals, yvals, label=f"({row+1},{col+1})", linewidth=1.0)
-            ax.set_title(f"Row {row + 1}")
-            ax.set_xlabel("Time (s)")
-            ax.set_ylabel(ylabel)
-            ax.grid(True, which="both", alpha=0.25)
-        fig.tight_layout()
-        fig.savefig(run_folder / f"semilogy_grouped_64channels_{suffix}.png")
-        plt.close(fig)
+    fig, axes = plt.subplots(2, 4, figsize=(16, 9))
+    for row in range(8):
+        ax = axes.flat[row]
+        for col in range(8):
+            idx = row * 8 + col
+            yvals = np.abs(scale_for_display(acu_sums_64[:, idx], conversion_factor, display_in_v2))
+            yvals[yvals <= 0] = np.nan
+            ax.semilogy(xvals, yvals, label=f"({row+1},{col+1})", linewidth=1.0)
+        ax.set_title(f"Row {row + 1}")
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel(running_mean_axis_label(display_in_v2, use_abs=True))
+        ax.grid(True, which="both", alpha=0.25)
+    fig.tight_layout()
+    suffix = "V2" if display_in_v2 else "urad2"
+    save_figure_with_provenance(fig, run_folder / f"semilogy_grouped_64channels_{suffix}.png", run_folder)
+    plt.close(fig)
 
 
 def dedupe_pairs(pairs: np.ndarray, labels: list[str]) -> tuple[np.ndarray, list[str]]:
@@ -850,7 +946,14 @@ def dedupe_pairs(pairs: np.ndarray, labels: list[str]) -> tuple[np.ndarray, list
     return pairs[keep_indices], [labels[idx] for idx in keep_indices]
 
 
-def save_loglog_eval_pairs_runmean(run_folder: Path, cm: np.ndarray, pairs: np.ndarray, labels: list[str], conversion_factor: float) -> None:
+def save_loglog_eval_pairs_runmean(
+    run_folder: Path,
+    cm: np.ndarray,
+    pairs: np.ndarray,
+    labels: list[str],
+    conversion_factor: float,
+    display_in_v2: bool,
+) -> None:
     use_abs = True
     warmup_s = 1.0
     start_idx = max(0, round(warmup_s / FRAME_DT_S))
@@ -865,7 +968,7 @@ def save_loglog_eval_pairs_runmean(run_folder: Path, cm: np.ndarray, pairs: np.n
     pair_i2 = np.array([idx_lin(pair[2], pair[3]) for pair in pairs_uni], dtype=int)
     diff_v2 = cm[start_idx:, pair_i1] - cm[start_idx:, pair_i2]
     run_mean = np.cumsum(diff_v2, axis=0) / np.arange(1, diff_v2.shape[0] + 1, dtype=float)[:, None]
-    curves = scale_to_urad2(run_mean, conversion_factor)
+    curves = scale_for_display(run_mean, conversion_factor, display_in_v2)
     if use_abs:
         curves = np.abs(curves)
     curves[~np.isfinite(curves) | (curves <= 0)] = np.nan
@@ -879,15 +982,17 @@ def save_loglog_eval_pairs_runmean(run_folder: Path, cm: np.ndarray, pairs: np.n
                 ax.loglog(xvals, curves[:, idx], linewidth=1.8, label=labels_uni[idx])
             else:
                 ax.plot(time_tail, curves[:, idx], linewidth=1.8, label=labels_uni[idx])
-        if use_abs:
-            ax.set_ylabel(r"Abs Running Mean ($\mu rad^2$)")
-        else:
-            ax.set_ylabel(r"Running Mean ($\mu rad^2$)")
+        ax.set_ylabel(running_mean_axis_label(display_in_v2, use_abs=use_abs))
         ax.set_xlabel("Time (s)")
         ax.set_title(f"Running-Mean vs Time, Pairs {lo + 1}-{hi}")
         ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
         fig.tight_layout()
-        fig.savefig(run_folder / f"loglog_eval_pairs_runmean_urad2_group_{group_idx:02d}.png")
+        suffix = "V2" if display_in_v2 else "urad2"
+        save_figure_with_provenance(
+            fig,
+            run_folder / f"loglog_eval_pairs_runmean_{suffix}_group_{group_idx:02d}.png",
+            run_folder,
+        )
         plt.close(fig)
 
 
@@ -898,6 +1003,7 @@ def save_variation_and_fft(
     bin_cumsums: list[np.ndarray],
     labels: list[str],
     keep_indices: list[int],
+    display_in_v2: bool,
 ) -> None:
     if counts.size == 0:
         return
@@ -930,10 +1036,10 @@ def save_variation_and_fft(
 
     ax_var.set_title("Frame Variation (Cleaned)")
     ax_var.set_xlabel("Time (s)")
-    ax_var.set_ylabel(r"$\Delta$ amplitude")
+    ax_var.set_ylabel(delta_axis_label(display_in_v2))
     ax_var.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
     fig_var.tight_layout()
-    fig_var.savefig(run_folder / "variation_vs_time.png")
+    save_figure_with_provenance(fig_var, run_folder / "variation_vs_time.png", run_folder)
     plt.close(fig_var)
 
     ax_fft.set_title("FFT Spectrum (Cleaned)")
@@ -942,7 +1048,7 @@ def save_variation_and_fft(
     ax_fft.set_yscale("log")
     ax_fft.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
     fig_fft.tight_layout()
-    fig_fft.savefig(run_folder / "fft_spectrum.png")
+    save_figure_with_provenance(fig_fft, run_folder / "fft_spectrum.png", run_folder)
     plt.close(fig_fft)
 
 
@@ -953,6 +1059,7 @@ def save_signal_emergence_movie(
     bin_cumsums: list[np.ndarray],
     labels: list[str],
     keep_indices: list[int],
+    display_in_v2: bool,
 ) -> None:
     if imageio is None or counts.size == 0:
         warnings.warn("imageio is not installed, so signal_emergence.mp4 was skipped.")
@@ -985,7 +1092,7 @@ def save_signal_emergence_movie(
         (line,) = ax.plot([], [], "o-", linewidth=1.5, markersize=4, label=labels[idx])
         line_handles.append(line)
     ax.set_xlabel("Delay (ps)")
-    ax.set_ylabel(r"Amplitude ($\mu rad^2$)")
+    ax.set_ylabel(amplitude_axis_label(display_in_v2))
     ax.set_xlim(float(np.min(finite_ts)), float(np.max(finite_ts)))
     ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
 
@@ -1032,6 +1139,7 @@ def save_grouped_loglog_convergence(
     bin_cumsums: list[np.ndarray],
     labels: list[str],
     pair_count: int,
+    display_in_v2: bool,
 ) -> None:
     groups = [
         list(range(1, 8)),
@@ -1082,12 +1190,12 @@ def save_grouped_loglog_convergence(
             if ax_idx >= (n_rows - 1) * n_cols:
                 ax.set_xlabel("Time (s)")
             if ax_idx % n_cols == 0:
-                ax.set_ylabel(r"|$\mu rad^2$|")
+                ax.set_ylabel(running_mean_axis_label(display_in_v2, use_abs=True))
         for ax in axes_flat[n_plots:]:
             ax.axis("off")
         fig.suptitle(f"Log-Log Convergence (Group {g_idx})", fontsize=14)
         fig.tight_layout()
-        fig.savefig(run_folder / f"loglog_convergence_group{g_idx}.png")
+        save_figure_with_provenance(fig, run_folder / f"loglog_convergence_group{g_idx}.png", run_folder)
         plt.close(fig)
 
 
@@ -1109,6 +1217,8 @@ def update_metadata_json(run_folder: Path, meta: Meta) -> None:
     physics["ShotNoise2_V"] = None if not np.isfinite(meta.shot_noise2_v) else meta.shot_noise2_v
     physics["SignalLevel_V2_rtHz"] = None if not np.isfinite(meta.signal_level) else meta.signal_level
     physics["ConversionFactor_V2_rad2"] = None if not np.isfinite(meta.conversion_factor) else meta.conversion_factor
+    physics["IsDarkNoiseRun"] = is_dark_noise_run(meta)
+    physics["DisplayAmplitudeUnit"] = "V^2" if is_dark_noise_run(meta) else "urad^2"
     physics.pop("ShotNoiseResult_urad2_rtHz", None)
     physics.pop("ShotNoiseResult_V2_rtHz", None)
     shot_noise_result = None if not np.isfinite(meta.shot_noise_result) else meta.shot_noise_result
@@ -1159,6 +1269,7 @@ def run_pipeline(
 
     meta = read_sensitivity_log(run_folder)
     conversion_factor = meta.conversion_factor
+    display_in_v2 = is_dark_noise_run(meta)
 
     if pos_path is None:
         pos_on_cm = np.full(n_frames, 25.058, dtype=float)
@@ -1263,7 +1374,13 @@ def run_pipeline(
     pair_i2 = np.array([idx_lin(pair[2], pair[3]) for pair in pairs], dtype=int)
     pair_diffs = cm[:, pair_i1] - cm[:, pair_i2]
 
-    bin_cumsums, counts = build_bin_cumsums_and_counts(pair_diffs, inverse, valid_indices, conversion_factor)
+    bin_cumsums, counts = build_bin_cumsums_and_counts(
+        pair_diffs,
+        inverse,
+        valid_indices,
+        conversion_factor,
+        display_in_v2,
+    )
 
     if counts.size == 0 or not np.any(counts > 0):
         raise ValueError("No valid position bins remained after filtering.")
@@ -1293,7 +1410,7 @@ def run_pipeline(
 
     save_all_pairs_plot(run_folder, ts, amps, labels, meta, kmin)
     acquisition_time_s = float(t_seconds[-1] - t_seconds[0]) if t_seconds.size > 1 else 0.0
-    save_selected_pairs_plot(run_folder, ts, amps, labels, critical_keep_indices, acquisition_time_s)
+    save_selected_pairs_plot(run_folder, ts, amps, labels, critical_keep_indices, acquisition_time_s, display_in_v2)
     save_loglog_eval(
         run_folder,
         np.maximum(t_seconds - t_seconds[0], FRAME_DT_S),
@@ -1302,14 +1419,26 @@ def run_pipeline(
         labels,
         conversion_factor,
         critical_keep_indices,
+        display_in_v2,
     )
     save_heatmaps(run_folder, cm, conversion_factor)
-    save_semilogy_grouped_64channels(run_folder, cm, conversion_factor)
-    save_loglog_eval_pairs_runmean(run_folder, cm, pairs, labels, conversion_factor)
-    save_grouped_loglog_convergence(run_folder, bin_vals, bin_cumsums, labels, len(labels))
-    save_variation_and_fft(run_folder, ts, counts, bin_cumsums, labels, critical_keep_indices)
-    save_signal_emergence_movie(run_folder, ts, counts, bin_cumsums, labels, critical_keep_indices)
+    save_semilogy_grouped_64channels(run_folder, cm, conversion_factor, display_in_v2)
+    save_loglog_eval_pairs_runmean(run_folder, cm, pairs, labels, conversion_factor, display_in_v2)
+    save_grouped_loglog_convergence(run_folder, bin_vals, bin_cumsums, labels, len(labels), display_in_v2)
+    save_variation_and_fft(run_folder, ts, counts, bin_cumsums, labels, critical_keep_indices, display_in_v2)
+    save_signal_emergence_movie(run_folder, ts, counts, bin_cumsums, labels, critical_keep_indices, display_in_v2)
     update_metadata_json(run_folder, meta)
+    update_datafiles_browser_index(run_folder)
+
+
+def update_datafiles_browser_index(run_folder: Path) -> None:
+    try:
+        from datafiles_browser import index_run_folder
+
+        record = index_run_folder(run_folder)
+        print(f"Updated DataFiles Browser index for {record.folder_name}", flush=True)
+    except Exception as exc:
+        print(f"Warning: could not update DataFiles Browser index: {exc}", flush=True)
 
 
 def main() -> None:
