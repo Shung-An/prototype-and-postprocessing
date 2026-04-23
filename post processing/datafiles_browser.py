@@ -77,6 +77,7 @@ class RunRecord:
     metadata_path: Path | None
     sortable_date: datetime
     sample: str = ""
+    exp_tag: str = ""
     description: str = ""
     tags: list[str] = field(default_factory=list)
     filename: str = ""
@@ -329,6 +330,22 @@ def load_run_record(final_result_path: Path) -> RunRecord:
                     pass
 
             record.sample = payload.get("Sample", "") or ""
+            record.exp_tag = str(
+                first_matching_value(
+                    payload,
+                    [
+                        ("ExperimentTag",),
+                        ("ExpTag",),
+                        ("Experiment",),
+                        ("ExperimentName",),
+                        ("Configuration", "ExperimentTag"),
+                        ("Configuration", "ExpTag"),
+                        ("PhysicsData", "ExperimentTag"),
+                        ("PhysicsData", "ExpTag"),
+                    ],
+                )
+                or ""
+            )
             record.description = payload.get("Description", "") or ""
             record.tags = [str(tag) for tag in payload.get("Tags", []) if tag]
             record.filename = payload.get("Filename", "") or ""
@@ -450,6 +467,7 @@ def ensure_index_db() -> None:
                 metadata_path TEXT,
                 sortable_date TEXT NOT NULL,
                 sample TEXT NOT NULL,
+                exp_tag TEXT NOT NULL DEFAULT '',
                 description TEXT NOT NULL,
                 tags_json TEXT NOT NULL,
                 filename TEXT NOT NULL,
@@ -471,6 +489,9 @@ def ensure_index_db() -> None:
             )
             """
         )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
+        if "exp_tag" not in columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN exp_tag TEXT NOT NULL DEFAULT ''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_root_date ON runs(root_key, sortable_date DESC)")
         conn.execute("CREATE TABLE IF NOT EXISTS roots (root_key TEXT PRIMARY KEY, root_path TEXT NOT NULL, last_indexed_utc TEXT NOT NULL, run_count INTEGER NOT NULL)")
 
@@ -492,11 +513,11 @@ def upsert_run_record_in_db(root_path: Path, record: RunRecord) -> None:
             INSERT INTO runs (
                 root_key, folder_path, folder_name, final_result_path, movie_path, loglog_plot_path,
                 diagonal_offset_path, raw_std_plot_path, metadata_path, sortable_date, sample,
-                description, tags_json, filename, duration, star_measurement, sample_power_mw,
+                exp_tag, description, tags_json, filename, duration, star_measurement, sample_power_mw,
                 power_mw_1, power_mw_2, environment_temperature_k, environment_temperature_c,
                 sensitivity_v_photon, shot_noise_urad2_rthz, scan_range_mm, scan_min_mm,
                 scan_max_mm, metadata_text, search_blob
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(root_key, folder_path) DO UPDATE SET
                 folder_name=excluded.folder_name,
                 final_result_path=excluded.final_result_path,
@@ -507,6 +528,7 @@ def upsert_run_record_in_db(root_path: Path, record: RunRecord) -> None:
                 metadata_path=excluded.metadata_path,
                 sortable_date=excluded.sortable_date,
                 sample=excluded.sample,
+                exp_tag=excluded.exp_tag,
                 description=excluded.description,
                 tags_json=excluded.tags_json,
                 filename=excluded.filename,
@@ -537,6 +559,7 @@ def upsert_run_record_in_db(root_path: Path, record: RunRecord) -> None:
                 _serialize_path(record.metadata_path),
                 record.sortable_date.isoformat(),
                 record.sample,
+                record.exp_tag,
                 record.description,
                 json.dumps(record.tags),
                 record.filename,
@@ -568,11 +591,11 @@ def write_runs_to_db(root_path: Path, runs: list[RunRecord]) -> None:
             INSERT INTO runs (
                 root_key, folder_path, folder_name, final_result_path, movie_path, loglog_plot_path,
                 diagonal_offset_path, raw_std_plot_path, metadata_path, sortable_date, sample,
-                description, tags_json, filename, duration, star_measurement, sample_power_mw,
+                exp_tag, description, tags_json, filename, duration, star_measurement, sample_power_mw,
                 power_mw_1, power_mw_2, environment_temperature_k, environment_temperature_c,
                 sensitivity_v_photon, shot_noise_urad2_rthz, scan_range_mm, scan_min_mm,
                 scan_max_mm, metadata_text, search_blob
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -587,6 +610,7 @@ def write_runs_to_db(root_path: Path, runs: list[RunRecord]) -> None:
                     _serialize_path(run.metadata_path),
                     run.sortable_date.isoformat(),
                     run.sample,
+                    run.exp_tag,
                     run.description,
                     json.dumps(run.tags),
                     run.filename,
@@ -645,6 +669,7 @@ def load_runs_from_db(root_path: Path) -> list[RunRecord]:
                 metadata_path=_deserialize_path(row["metadata_path"]),
                 sortable_date=datetime.fromisoformat(row["sortable_date"]),
                 sample=row["sample"],
+                exp_tag=row["exp_tag"],
                 description=row["description"],
                 tags=[str(tag) for tag in json.loads(row["tags_json"] or "[]") if tag],
                 filename=row["filename"],
@@ -708,6 +733,7 @@ class DataFilesBrowser(tk.Tk):
         "date": "Date",
         "run": "Run Folder",
         "sample": "Sample",
+        "exp_tag": "Exp Tag",
         "power": "Port Power (mW)",
         "sample_power": "Sample Power (mW)",
         "temp": "Temp (K)",
@@ -721,6 +747,7 @@ class DataFilesBrowser(tk.Tk):
         "date": 140,
         "run": 220,
         "sample": 185,
+        "exp_tag": 130,
         "power": 120,
         "sample_power": 120,
         "temp": 90,
@@ -771,6 +798,7 @@ class DataFilesBrowser(tk.Tk):
             cleaned_visible = {str(column) for column in visible_columns if str(column) in self.COLUMN_TITLES}
             if cleaned_visible:
                 self.visible_columns = cleaned_visible
+        self.visible_columns.add("exp_tag")
 
     def save_config(self) -> None:
         try:
@@ -811,8 +839,8 @@ class DataFilesBrowser(tk.Tk):
         self.banner_visible = True
         self.table_visible = True
         self.run_by_iid: dict[str, RunRecord] = {}
-        self.column_order = ["star", "date", "sample", "power", "sample_power", "temp", "duration", "shot_noise", "range", "run"]
-        self.visible_columns = {"star", "date", "sample", "power", "sample_power", "temp", "duration", "shot_noise", "range"}
+        self.column_order = ["star", "date", "sample", "exp_tag", "power", "sample_power", "temp", "duration", "shot_noise", "range", "run"]
+        self.visible_columns = {"star", "date", "sample", "exp_tag", "power", "sample_power", "temp", "duration", "shot_noise", "range"}
 
         self.root_var = tk.StringVar(value=str(ROOT_DEFAULT))
         self.search_var = tk.StringVar()
@@ -1119,6 +1147,7 @@ class DataFilesBrowser(tk.Tk):
                     "[x]" if run.star_measurement else "[ ]",
                     run.sortable_date.strftime("%Y-%m-%d %H:%M"),
                     run.sample or "-",
+                    run.exp_tag or "-",
                     run.port_power_display,
                     run.sample_power_display,
                     run.environment_temperature_display_k,
@@ -1144,6 +1173,8 @@ class DataFilesBrowser(tk.Tk):
             return (0, run.folder_name.lower())
         if column == "sample":
             return (0, run.sample.lower())
+        if column == "exp_tag":
+            return (0, run.exp_tag.lower())
         if column == "power":
             values = [value for value in (run.physics.power_mw_1, run.physics.power_mw_2) if value is not None]
             value = sum(values) / len(values) if values else None
@@ -1435,6 +1466,7 @@ class DataFilesBrowser(tk.Tk):
 
         fields: list[tuple[str, str, str]] = [
             ("Sample", "sample", run.sample),
+            ("Exp Tag", "exp_tag", run.exp_tag),
             ("Description", "description", run.description),
             ("Tags (comma)", "tags", ", ".join(run.tags)),
             ("Filename", "filename", run.filename),
@@ -1492,6 +1524,7 @@ class DataFilesBrowser(tk.Tk):
                 payload["PhysicsData"] = physics
 
                 payload["Sample"] = entry_vars["sample"].get().strip()
+                payload["ExperimentTag"] = entry_vars["exp_tag"].get().strip()
                 payload["Description"] = entry_vars["description"].get().strip()
                 payload["Tags"] = [tag.strip() for tag in entry_vars["tags"].get().split(",") if tag.strip()]
                 payload["Filename"] = entry_vars["filename"].get().strip()
@@ -1553,6 +1586,7 @@ class DataFilesBrowser(tk.Tk):
             run.folder_name,
             str(run.folder_path),
             run.sample,
+            run.exp_tag,
             run.description,
             run.tags_display,
             run.filename,

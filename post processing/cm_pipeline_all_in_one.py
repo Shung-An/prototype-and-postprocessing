@@ -113,6 +113,9 @@ CRITICAL_PAIR_MAX_COUNT = 8
 class Meta:
     p1_mw: float = math.nan
     p2_mw: float = math.nan
+    power_detector_attenuator_applied: bool = False
+    power_detector_attenuator_total_db: float = 0.0
+    power_detector_attenuator_correction_factor: float = 1.0
     sensitivity: float = math.nan
     shot_noise1_v: float = math.nan
     shot_noise2_v: float = math.nan
@@ -232,6 +235,13 @@ def extract_val(text: str, pattern: str) -> float:
     return float(match.group(1)) if match else math.nan
 
 
+def extract_bool(text: str, pattern: str) -> bool | None:
+    match = re.search(pattern, text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).strip().lower() in {"true", "1", "yes", "on"}
+
+
 def read_sensitivity_log(run_folder: Path) -> Meta:
     meta = Meta()
     path = run_folder / "sensitivity.log"
@@ -239,6 +249,15 @@ def read_sensitivity_log(run_folder: Path) -> Meta:
         return meta
 
     text = path.read_text(encoding="utf-8", errors="ignore")
+    attenuator_applied = extract_bool(text, r"Power Detector Attenuator Applied\s*=\s*(true|false|1|0|yes|no|on|off)")
+    if attenuator_applied is not None:
+        meta.power_detector_attenuator_applied = attenuator_applied
+    meta.power_detector_attenuator_total_db = extract_val(text, r"(?:Total|Power Detector Attenuator Total)\s*=\s*([\d\.E\+\-]+)\s*dB")
+    meta.power_detector_attenuator_correction_factor = extract_val(text, r"Correction Factor\s*=\s*([\d\.E\+\-]+)")
+    if not np.isfinite(meta.power_detector_attenuator_total_db):
+        meta.power_detector_attenuator_total_db = 20.0 if meta.power_detector_attenuator_applied else 0.0
+    if not np.isfinite(meta.power_detector_attenuator_correction_factor):
+        meta.power_detector_attenuator_correction_factor = 10 ** (meta.power_detector_attenuator_total_db / 10.0) if meta.power_detector_attenuator_applied else 1.0
     meta.p1_mw = extract_val(text, r"P1\s*=\s*([\d\.E\+\-]+)\s*mW")
     meta.p2_mw = extract_val(text, r"P2\s*=\s*([\d\.E\+\-]+)\s*mW")
     meta.sensitivity = extract_val(text, r"Sensitivity\s*=\s*([\d\.E\+\-]+)")
@@ -261,6 +280,23 @@ def is_dark_noise_run(meta: Meta) -> bool:
     invalid_conversion = (not np.isfinite(meta.conversion_factor)) or meta.conversion_factor <= 0
     very_low_power = total_power_mw <= 0.05
     return invalid_conversion or very_low_power or use_v2_for_shot_noise(meta)
+
+
+def dark_noise_reason(meta: Meta) -> str | None:
+    powers = (meta.p1_mw, meta.p2_mw)
+    if any(not np.isfinite(value) for value in powers):
+        return "port power undefined"
+    if any(value <= 0 for value in powers):
+        return "port power is zero"
+
+    total_power_mw = float(np.sum(powers))
+    if total_power_mw <= 0.05:
+        return "total port power below dark-noise threshold"
+    if (not np.isfinite(meta.conversion_factor)) or meta.conversion_factor <= 0:
+        return "conversion factor undefined or non-positive"
+    if use_v2_for_shot_noise(meta):
+        return "shot-noise result indicates V^2 dark-noise scaling"
+    return None
 
 
 def scale_for_display(values: np.ndarray, conversion_factor: float, display_in_v2: bool) -> np.ndarray:
@@ -1212,13 +1248,22 @@ def update_metadata_json(run_folder: Path, meta: Meta) -> None:
     physics = payload.setdefault("PhysicsData", {})
     physics["Power_mW_1"] = None if not np.isfinite(meta.p1_mw) else meta.p1_mw
     physics["Power_mW_2"] = None if not np.isfinite(meta.p2_mw) else meta.p2_mw
+    physics["PowerDetectorAttenuatorApplied"] = bool(meta.power_detector_attenuator_applied)
+    physics["PowerDetectorAttenuatorCount"] = 2 if meta.power_detector_attenuator_applied else 0
+    physics["PowerDetectorAttenuatorEach_dB"] = 10.0 if meta.power_detector_attenuator_applied else 0.0
+    physics["PowerDetectorAttenuatorTotal_dB"] = meta.power_detector_attenuator_total_db
+    physics["PowerDetectorAttenuatorCorrectionFactor"] = meta.power_detector_attenuator_correction_factor
     physics["Sensitivity_V_photon"] = None if not np.isfinite(meta.sensitivity) else meta.sensitivity
     physics["ShotNoise1_V"] = None if not np.isfinite(meta.shot_noise1_v) else meta.shot_noise1_v
     physics["ShotNoise2_V"] = None if not np.isfinite(meta.shot_noise2_v) else meta.shot_noise2_v
     physics["SignalLevel_V2_rtHz"] = None if not np.isfinite(meta.signal_level) else meta.signal_level
     physics["ConversionFactor_V2_rad2"] = None if not np.isfinite(meta.conversion_factor) else meta.conversion_factor
-    physics["IsDarkNoiseRun"] = is_dark_noise_run(meta)
-    physics["DisplayAmplitudeUnit"] = "V^2" if is_dark_noise_run(meta) else "urad^2"
+    dark_reason = dark_noise_reason(meta)
+    is_dark = dark_reason is not None or is_dark_noise_run(meta)
+    physics["IsDarkNoiseRun"] = is_dark
+    physics["DarkNoiseLabel"] = "Dark noise" if is_dark else "Signal"
+    physics["DarkNoiseReason"] = dark_reason
+    physics["DisplayAmplitudeUnit"] = "V^2" if is_dark else "urad^2"
     physics.pop("ShotNoiseResult_urad2_rtHz", None)
     physics.pop("ShotNoiseResult_V2_rtHz", None)
     shot_noise_result = None if not np.isfinite(meta.shot_noise_result) else meta.shot_noise_result
