@@ -25,11 +25,13 @@ except ImportError:
 
 
 BIN_MM = 0.1
-# Area scaling from detector pixel units to percent:
+# Area scaling from detector pixel units:
 # - 0.24 is the detector pitch in mm per pixel.
 # - 32768 is the full-scale detector count used to normalize the raw signal.
-# - 100 converts the resulting fraction to percent.
-SCALE_FACTOR = (0.24**2) / (32768**2) * 100
+# Attenuator correction is applied separately from metadata/assumption below.
+DETECTOR_AREA_SCALE = (0.24**2) / (32768**2)
+# Bump this when a code or assumption change should force existing runs to rebuild once.
+PIPELINE_CACHE_VERSION = "2026-04-23-no-attenuator-scale-v1"
 # Conversion factor from distance in millimeters to time in picoseconds for this setup.
 MM_TO_PS = 6.6
 # Time per processed frame, in seconds:
@@ -40,12 +42,23 @@ RAW_STD_FRAME_INTEGRATION_S = FRAME_DT_S
 # Samples above this level are treated as saturated during cleanup/gating.
 SATURATION_THRESHOLD_CH11 = 3e-7
 SHOT_NOISE_RESULT_V2_THRESHOLD = 10_000
+MAX_LINE_PLOT_POINTS = 50_000
 
 ENABLE_DROPPED_WINDOW_GATING = False
 ENABLE_SATURATION_CLEANUP = False
 ENABLE_VARIANCE_GATING = False
 ENABLE_CHANNEL_HEALTH_GATING = False
 ENABLE_EVEN_FRAMES_ONLY = False
+ASSUME_POWER_DETECTOR_ATTENUATOR_APPLIED = False
+
+REQUIRED_PIPELINE_OUTPUTS = [
+    "metadata.json",
+    "final_amplitudes_all_pairs.csv",
+    "final_result_ALL_PAIRS.png",
+    "final_clean_result.png",
+    "loglog_eval.png",
+    "matrix_pattern_heatmaps.png",
+]
 
 PAIRS = np.array(
     [
@@ -250,7 +263,9 @@ def read_sensitivity_log(run_folder: Path) -> Meta:
 
     text = path.read_text(encoding="utf-8", errors="ignore")
     attenuator_applied = extract_bool(text, r"Power Detector Attenuator Applied\s*=\s*(true|false|1|0|yes|no|on|off)")
-    if attenuator_applied is not None:
+    if ASSUME_POWER_DETECTOR_ATTENUATOR_APPLIED is not None:
+        meta.power_detector_attenuator_applied = ASSUME_POWER_DETECTOR_ATTENUATOR_APPLIED
+    elif attenuator_applied is not None:
         meta.power_detector_attenuator_applied = attenuator_applied
     meta.power_detector_attenuator_total_db = extract_val(text, r"(?:Total|Power Detector Attenuator Total)\s*=\s*([\d\.E\+\-]+)\s*dB")
     meta.power_detector_attenuator_correction_factor = extract_val(text, r"Correction Factor\s*=\s*([\d\.E\+\-]+)")
@@ -461,8 +476,21 @@ def style_matplotlib() -> None:
             "axes.labelsize": 12,
             "legend.fontsize": 10,
             "savefig.dpi": 300,
+            "agg.path.chunksize": 10_000,
+            "path.simplify": True,
+            "path.simplify_threshold": 0.5,
         }
     )
+
+
+def downsample_for_plot(*arrays: np.ndarray, max_points: int = MAX_LINE_PLOT_POINTS) -> tuple[np.ndarray, ...]:
+    if not arrays:
+        return ()
+    length = len(arrays[0])
+    if length <= max_points:
+        return tuple(arrays)
+    step = int(math.ceil(length / max_points))
+    return tuple(array[::step] for array in arrays)
 
 
 def figure_provenance_text(run_folder: Path, extra: str | None = None) -> str:
@@ -497,6 +525,70 @@ def figure_provenance_metadata(run_folder: Path, extra: str | None = None) -> di
     if extra:
         metadata["SourceExtra"] = extra
     return metadata
+
+
+def pipeline_cache_signature() -> dict[str, object]:
+    return {
+        "version": PIPELINE_CACHE_VERSION,
+        "detector_area_scale": DETECTOR_AREA_SCALE,
+        "attenuator_assumption": ASSUME_POWER_DETECTOR_ATTENUATOR_APPLIED,
+        "enable_dropped_window_gating": ENABLE_DROPPED_WINDOW_GATING,
+        "enable_saturation_cleanup": ENABLE_SATURATION_CLEANUP,
+        "enable_variance_gating": ENABLE_VARIANCE_GATING,
+        "enable_channel_health_gating": ENABLE_CHANNEL_HEALTH_GATING,
+        "enable_even_frames_only": ENABLE_EVEN_FRAMES_ONLY,
+        "bin_mm": BIN_MM,
+        "mm_to_ps": MM_TO_PS,
+        "saturation_threshold_ch11": SATURATION_THRESHOLD_CH11,
+        "shot_noise_result_v2_threshold": SHOT_NOISE_RESULT_V2_THRESHOLD,
+    }
+
+
+def run_input_paths(run_folder: Path, pos_path: Path | None) -> list[Path]:
+    inputs = [
+        run_folder / "cm.bin",
+        run_folder / "profile.txt",
+        run_folder / "sensitivity.log",
+    ]
+    if pos_path is not None:
+        inputs.append(pos_path)
+    if ENABLE_DROPPED_WINDOW_GATING:
+        inputs.append(run_folder / "dropped_window.log")
+    return [path for path in inputs if path.is_file()]
+
+
+def run_output_paths(run_folder: Path) -> list[Path]:
+    return [run_folder / name for name in REQUIRED_PIPELINE_OUTPUTS]
+
+
+def metadata_cache_signature(run_folder: Path) -> dict[str, object] | None:
+    json_path = run_folder / "metadata.json"
+    if not json_path.is_file():
+        return None
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    post_processing = payload.get("PostProcessing", {})
+    if not isinstance(post_processing, dict):
+        return None
+    signature = post_processing.get("CacheSignature")
+    return signature if isinstance(signature, dict) else None
+
+
+def outputs_are_current(input_paths: list[Path], output_paths: list[Path]) -> bool:
+    if not input_paths or any(not path.is_file() for path in output_paths):
+        return False
+    newest_input = max(path.stat().st_mtime for path in input_paths)
+    oldest_output = min(path.stat().st_mtime for path in output_paths)
+    return oldest_output >= newest_input
+
+
+def should_skip_run(run_folder: Path, pos_path: Path | None) -> bool:
+    return (
+        metadata_cache_signature(run_folder) == pipeline_cache_signature()
+        and outputs_are_current(run_input_paths(run_folder, pos_path), run_output_paths(run_folder))
+    )
 
 
 def save_figure_with_provenance(
@@ -563,14 +655,17 @@ def save_raw_std_analysis(run_folder: Path, raw_cm: np.ndarray, t_seconds: np.nd
             writer.writerow([idx, idx + 1, f"{time_s:.6f}", f"{std_value:.6f}"])
 
     fig, ax = plt.subplots(figsize=(12, 6.5))
-    ax.plot(integrated_time_s, raw_std, "o-", color="#1f77b4", markersize=3.5, linewidth=1.0, label="Raw std")
+    plot_time_s, plot_raw_std = downsample_for_plot(integrated_time_s, raw_std)
+    raw_marker = "o" if plot_raw_std.size <= 5_000 else None
+    ax.plot(plot_time_s, plot_raw_std, marker=raw_marker, linestyle="-", color="#1f77b4", markersize=3.5, linewidth=1.0, label="Raw std")
     window = min(9, raw_std.size)
     if window % 2 == 0:
         window -= 1
     if window >= 3:
         kernel = np.ones(window, dtype=float) / window
         trend = np.convolve(raw_std, kernel, mode="same")
-        ax.plot(integrated_time_s, trend, color="black", linewidth=1.5, label=f"Rolling mean ({window})")
+        plot_trend_time_s, plot_trend = downsample_for_plot(integrated_time_s, trend)
+        ax.plot(plot_trend_time_s, plot_trend, color="black", linewidth=1.5, label=f"Rolling mean ({window})")
     ax.set_title("Raw Std Evolution")
     ax.set_xlabel("Integrated time (s)")
     ax.set_ylabel("Raw std")
@@ -864,7 +959,8 @@ def save_loglog_eval(
     fig, ax = plt.subplots(figsize=(9, 6.5))
     xvals = np.maximum(time_tail, FRAME_DT_S)
     for col_idx, pair_idx in enumerate(keep_indices):
-        ax.loglog(xvals, yvals[:, col_idx], label=labels[pair_idx])
+        plot_x, plot_y = downsample_for_plot(xvals, yvals[:, col_idx])
+        ax.loglog(plot_x, plot_y, label=labels[pair_idx])
     ax.set_title("Log-Log Evaluation (Cleaned)")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel(running_mean_axis_label(display_in_v2, use_abs=True))
@@ -1220,7 +1316,8 @@ def save_grouped_loglog_convergence(
                 cumavg = curve[:frames_per_bin] / np.arange(1, frames_per_bin + 1)
                 y = np.abs(cumavg)
                 y[y <= 0] = np.nan
-                ax.loglog(time_axis, y, color=color_map[b_idx], linewidth=1)
+                plot_time_axis, plot_y = downsample_for_plot(time_axis, y)
+                ax.loglog(plot_time_axis, plot_y, color=color_map[b_idx], linewidth=1)
             ax.set_title(labels[pair_idx], fontsize=10)
             ax.grid(True, which="both", alpha=0.25)
             if ax_idx >= (n_rows - 1) * n_cols:
@@ -1275,6 +1372,11 @@ def update_metadata_json(run_folder: Path, meta: Meta) -> None:
     physics["ScanMin_mm"] = meta.scan_min
     physics["ScanMax_mm"] = meta.scan_max
 
+    post_processing = payload.setdefault("PostProcessing", {})
+    post_processing["Pipeline"] = "cm_pipeline_all_in_one.py"
+    post_processing["CacheSignature"] = pipeline_cache_signature()
+    post_processing["ProcessedAt"] = datetime.now().isoformat(timespec="seconds")
+
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
@@ -1283,6 +1385,7 @@ def run_pipeline(
     review_first_n: int = 0,
     review_start_idx: int = 0,
     review_only: bool = False,
+    force: bool = False,
 ) -> None:
     style_matplotlib()
     run_folder = Path(target_folder)
@@ -1294,6 +1397,11 @@ def run_pipeline(
 
     if not cm_path.is_file():
         raise FileNotFoundError("cm.bin not found.")
+
+    if not force and review_first_n <= 0 and should_skip_run(run_folder, pos_path):
+        print(f"Skipped current run: {run_folder}", flush=True)
+        update_datafiles_browser_index(run_folder)
+        return
 
     raw_cm_all = read_cm64(cm_path)
     n_frames_all = raw_cm_all.shape[0]
@@ -1307,12 +1415,13 @@ def run_pipeline(
         raw_cm = raw_cm[::2]
         t_seconds = t_seconds[::2]
         t_absolute_seconds = t_absolute_seconds[::2]
-    cm = raw_cm * SCALE_FACTOR
     n_frames = raw_cm.shape[0]
     base_dt = datetime(1900, 1, 1)
     t_datetimes = [base_dt + timedelta(seconds=float(s)) for s in t_absolute_seconds]
 
     meta = read_sensitivity_log(run_folder)
+    cm_scale_factor = DETECTOR_AREA_SCALE * meta.power_detector_attenuator_correction_factor
+    cm = raw_cm * cm_scale_factor
     conversion_factor = meta.conversion_factor
     display_in_v2 = is_dark_noise_run(meta)
 
@@ -1510,6 +1619,11 @@ def main() -> None:
         action="store_true",
         help="Only export the raw matrix review assets and skip the rest of the pipeline.",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Rebuild every requested run even when cached outputs are current.",
+    )
     args = parser.parse_args()
 
     run_folders = list(args.run_folders)
@@ -1533,6 +1647,7 @@ def main() -> None:
             review_first_n=args.review_first_n,
             review_start_idx=args.review_start_idx,
             review_only=args.review_only,
+            force=args.force,
         )
 
 

@@ -21,6 +21,32 @@ except ImportError:  # Pillow is optional; the app still works without it.
     Image = None
     ImageTk = None
 
+try:
+    from metadata_manager import normalize_metadata, safe_tags, safe_text
+except ImportError:
+    def safe_text(value: object, default: str = "") -> str:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, (int, float, bool)):
+            return str(value)
+        if isinstance(value, list):
+            return ", ".join(safe_text(item) for item in value if safe_text(item))
+        return default
+
+    def safe_tags(value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [safe_text(item) for item in value if safe_text(item)]
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(",") if part.strip()]
+        return []
+
+    def normalize_metadata(payload: dict[str, object]) -> dict[str, object]:
+        return payload
+
 
 ROOT_DEFAULT = Path(r"D:\Quantum Squeezing Project\DataFiles")
 FINAL_RESULT_NAME = "final_clean_result.png"
@@ -320,7 +346,7 @@ def load_run_record(final_result_path: Path) -> RunRecord:
     if record.metadata_path and record.metadata_path.exists():
         try:
             record.metadata_text = record.metadata_path.read_text(encoding="utf-8")
-            payload = json.loads(record.metadata_text)
+            payload = normalize_metadata(json.loads(record.metadata_text))
 
             timestamp = payload.get("Timestamp")
             if isinstance(timestamp, str):
@@ -329,8 +355,8 @@ def load_run_record(final_result_path: Path) -> RunRecord:
                 except ValueError:
                     pass
 
-            record.sample = payload.get("Sample", "") or ""
-            record.exp_tag = str(
+            record.sample = safe_text(payload.get("Sample"))
+            record.exp_tag = safe_text(
                 first_matching_value(
                     payload,
                     [
@@ -344,12 +370,11 @@ def load_run_record(final_result_path: Path) -> RunRecord:
                         ("PhysicsData", "ExpTag"),
                     ],
                 )
-                or ""
             )
-            record.description = payload.get("Description", "") or ""
-            record.tags = [str(tag) for tag in payload.get("Tags", []) if tag]
-            record.filename = payload.get("Filename", "") or ""
-            record.duration = payload.get("Duration", "") or ""
+            record.description = safe_text(payload.get("Description"))
+            record.tags = safe_tags(payload.get("Tags"))
+            record.filename = safe_text(payload.get("Filename"))
+            record.duration = safe_text(payload.get("Duration"))
             record.star_measurement = safe_bool(
                 first_matching_value(
                     payload,
@@ -941,6 +966,7 @@ class DataFilesBrowser(tk.Tk):
         self.tree_menu = tk.Menu(self, tearoff=0)
         self.tree_menu.add_command(label="Toggle Star", command=self.toggle_star_from_menu)
         self.tree_menu.add_command(label="Edit Metadata", command=self.edit_metadata)
+        self.tree_menu.add_command(label="Normalize Metadata", command=self.normalize_selected_metadata)
         self.tree_menu.add_command(label="Open Folder", command=self.open_selected_folder)
         self.tree_menu.add_command(label="Open Image", command=self.open_selected_image)
         self.tree_menu.add_command(label="Open MP4", command=self.open_selected_mp4)
@@ -968,6 +994,7 @@ class DataFilesBrowser(tk.Tk):
         self.table_toggle_button = tk.Button(action_frame, text="Hide Table", width=12, command=self.toggle_table)
         self.table_toggle_button.pack(side="left", padx=(0, 8))
         tk.Button(action_frame, text="Edit Metadata", width=12, command=self.edit_metadata).pack(side="left", padx=(0, 8))
+        tk.Button(action_frame, text="Normalize", width=12, command=self.normalize_selected_metadata).pack(side="left", padx=(0, 8))
         tk.Button(action_frame, text="Open Folder", width=12, command=self.open_selected_folder).pack(side="left", padx=(0, 8))
         tk.Button(action_frame, text="Show FFT", width=12, command=self.show_latest_fft_result).pack(side="left", padx=(0, 8))
         tk.Button(action_frame, text="Rerun", width=12, command=self.rerun_selected_analysis).pack(side="left")
@@ -1420,14 +1447,37 @@ class DataFilesBrowser(tk.Tk):
 
     def _load_or_create_metadata_payload(self, run: RunRecord) -> dict[str, object]:
         if run.metadata_path and run.metadata_path.exists():
-            return json.loads(run.metadata_path.read_text(encoding="utf-8"))
+            payload = json.loads(run.metadata_path.read_text(encoding="utf-8"))
+            return normalize_metadata(payload) if isinstance(payload, dict) else {}
         run.metadata_path = run.folder_path / "metadata.json"
         return {}
 
     def _write_metadata_payload(self, run: RunRecord, payload: dict[str, object]) -> None:
         assert run.metadata_path is not None
+        payload = normalize_metadata(payload)
         run.metadata_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         run.metadata_text = json.dumps(payload, indent=2)
+
+    def normalize_selected_metadata(self) -> None:
+        run = self._selected_run()
+        if run is None:
+            return
+        try:
+            selected_iid = str(run.folder_path)
+            payload = self._load_or_create_metadata_payload(run)
+            self._write_metadata_payload(run, payload)
+            updated_run = load_run_record(run.final_result_path)
+            upsert_run_record_in_db(self._current_root_path, updated_run)
+            self._replace_run_record(updated_run)
+            self._refresh_search_blob(updated_run)
+            self.apply_filter()
+            if self.tree.exists(selected_iid):
+                self.tree.selection_set(selected_iid)
+                self.tree.focus(selected_iid)
+                self.show_run(updated_run)
+            self.status_var.set(f"Normalized metadata for {updated_run.folder_name}.")
+        except Exception as exc:
+            messagebox.showerror("Normalize Metadata Failed", f"Could not normalize metadata.json:\n{exc}")
 
     @staticmethod
     def _entry_float_or_none(value: str) -> float | None:
