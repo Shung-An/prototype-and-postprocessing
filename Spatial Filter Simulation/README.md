@@ -86,6 +86,54 @@ This lets the code translate between:
 - required beam size on the objective
 - pinhole radius needed to pass a target fraction of the focal-plane power
 
+For a non-ideal beam, a useful extension is
+
+```text
+w_focus ≈ M^2 * lambda * f / (pi * w_in)
+```
+
+So compared with an ideal Gaussian:
+
+- larger `M^2` gives a larger focused spot
+- larger wavelength gives a larger focused spot
+- larger beam size on the objective gives a smaller focused spot
+
+That means worse spatial purity usually makes the focused spot after the `20 mm` objective larger and therefore changes the pinhole size you need.
+
+## Mode Purity And M^2
+
+`TEM00` mode purity and `M^2` are related, but they are not the same quantity.
+
+- mode purity tells you how much power is in the fundamental Gaussian mode
+- `M^2` tells you how far the beam propagation differs from an ideal Gaussian beam
+
+For a beam expanded in Hermite-Gaussian modes with normalized mode powers `p_mn`, the script estimates:
+
+```text
+Mx^2 = sum(p_mn * (2m + 1))
+My^2 = sum(p_mn * (2n + 1))
+```
+
+and reports an average:
+
+```text
+M^2_avg = (Mx^2 + My^2) / 2
+```
+
+Important consequence:
+
+- pure `TEM00` gives `Mx^2 = My^2 = 1`
+- adding higher-order content always increases `M^2`
+- the same `TEM00` purity can correspond to different `M^2` values depending on which higher-order modes are present
+
+Examples:
+
+- `TEM10` increases `Mx^2` more than `My^2`
+- `TEM01` increases `My^2` more than `Mx^2`
+- `TEM20` and `TEM02` increase `M^2` more strongly than first-order modes for the same power fraction
+
+So there is no single universal conversion from purity to `M^2`, but for a given mode family there is a definite relationship.
+
 ## What This Model Captures Well
 
 - first-pass spatial filter sizing
@@ -137,7 +185,19 @@ Outputs are written to `output/`:
 - `focal_plane_enclosed_power.png`
 - `mode_purity_vs_focus_spot_20mm_objective.csv`
 - `mode_purity_vs_focus_spot_20mm_objective.png`
+- `m2_vs_mode_purity.png`
 - `README_results.txt`
+
+## Figure Links
+
+Current generated figures in this repo:
+
+- [Spatial filter sweep](output/spatial_filter_sweep.png)
+- [Spatial filter example fields](output/spatial_filter_example_fields.png)
+- [Focal-plane mode distribution](output/focal_plane_mode_distribution.png)
+- [Focal-plane enclosed power](output/focal_plane_enclosed_power.png)
+- [Mode purity vs focus spot for 20 mm objective](output/mode_purity_vs_focus_spot_20mm_objective.png)
+- [Estimated M^2 vs mode purity](output/m2_vs_mode_purity.png)
 
 ## How To Read The Figures
 
@@ -215,6 +275,18 @@ This is mainly a design-space figure:
 - if you want a certain spot size at the pinhole, it tells you what beam size is needed before the objective
 
 If the best purity curve is nearly flat, that means this simplified model is mostly scale-invariant and pinhole sizing matters more than the absolute spot size.
+
+### `m2_vs_mode_purity.png`
+
+This figure shows the estimated relationship between transmitted `TEM00` purity and the corresponding beam-quality factors `Mx^2`, `My^2`, and average `M^2`.
+
+Use it to connect the modal language to the more common beam-quality language:
+
+- higher purity usually means `M^2` closer to `1`
+- lower purity usually means larger focused spot after the `20 mm` objective
+- unequal `Mx^2` and `My^2` indicate directional asymmetry in the higher-order mode content
+
+This is especially useful if you want to compare the simulation against a beam profiler or knife-edge measurement that reports `M^2` rather than direct mode fractions.
 
 ## Practical Pinhole Selection
 

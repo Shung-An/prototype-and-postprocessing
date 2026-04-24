@@ -50,6 +50,14 @@ Outputs are written to `opo_output/`:
 - `opo_mode_mixing_vs_aperture.png`
 - `README_results.txt`
 
+## Figure Links
+
+Current generated figures in this repo:
+
+- [OPO mode mixing vs tilt](opo_output/opo_mode_mixing_vs_tilt.png)
+- [OPO mode mixing vs thermal lens](opo_output/opo_mode_mixing_vs_thermal_lens.png)
+- [OPO mode mixing vs aperture](opo_output/opo_mode_mixing_vs_aperture.png)
+
 ## How To Read The Figures
 
 ### `opo_mode_mixing_vs_tilt.png`

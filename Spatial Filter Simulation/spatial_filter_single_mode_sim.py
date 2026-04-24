@@ -143,6 +143,23 @@ def project_onto_basis(
     return projections
 
 
+def normalize_mode_powers(mode_powers: dict[tuple[int, int], float]) -> dict[tuple[int, int], float]:
+    total = sum(mode_powers.values())
+    if total <= 0:
+        return {key: 0.0 for key in mode_powers}
+    return {key: value / total for key, value in mode_powers.items()}
+
+
+def mode_powers_to_m2(mode_powers: dict[tuple[int, int], float]) -> tuple[float, float, float]:
+    normalized = normalize_mode_powers(mode_powers)
+    mx2 = 0.0
+    my2 = 0.0
+    for (nx, ny), power in normalized.items():
+        mx2 += power * (2 * nx + 1)
+        my2 += power * (2 * ny + 1)
+    return mx2, my2, 0.5 * (mx2 + my2)
+
+
 def make_input_field(
     components: list[ModeComponent],
     basis: dict[tuple[int, int], np.ndarray],
@@ -327,6 +344,28 @@ def plot_enclosed_power(
     plt.close(fig)
 
 
+def plot_m2_vs_purity(
+    purity: np.ndarray,
+    mx2: np.ndarray,
+    my2: np.ndarray,
+    mavg2: np.ndarray,
+    output_path: Path,
+) -> None:
+    fig, ax = plt.subplots(figsize=(7.4, 5.0))
+    ax.plot(purity, mx2, color="#005f73", linewidth=2.0, label="Mx^2")
+    ax.plot(purity, my2, color="#bb3e03", linewidth=2.0, label="My^2")
+    ax.plot(purity, mavg2, color="#0a9396", linewidth=2.0, label="Average M^2")
+    ax.set_title("Estimated M^2 vs TEM00 Purity")
+    ax.set_xlabel("TEM00 Purity")
+    ax.set_ylabel("Estimated M^2")
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.95, max(1.05, float(np.max([mx2.max(), my2.max(), mavg2.max()])) + 0.1))
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -457,6 +496,9 @@ def main() -> None:
     total_transmission: list[float] = []
     tem00_efficiency: list[float] = []
     tem00_purity: list[float] = []
+    transmitted_mx2: list[float] = []
+    transmitted_my2: list[float] = []
+    transmitted_mavg2: list[float] = []
 
     best_score = -1.0
     best_radius = radii[0]
@@ -473,6 +515,7 @@ def main() -> None:
         throughput = transmitted_power / input_power if input_power > 0 else 0.0
         tem00_throughput = tem00_power / input_tem00_power if input_tem00_power > 0 else 0.0
         score = purity * tem00_throughput
+        mx2, my2, mavg2 = mode_powers_to_m2(projections)
 
         if score > best_score:
             best_score = score
@@ -483,12 +526,18 @@ def main() -> None:
         total_transmission.append(throughput)
         tem00_efficiency.append(tem00_throughput)
         tem00_purity.append(purity)
+        transmitted_mx2.append(mx2)
+        transmitted_my2.append(my2)
+        transmitted_mavg2.append(mavg2)
 
         row: dict[str, float | int] = {
             "pinhole_radius_um": radius * 1e6,
             "total_transmission": throughput,
             "tem00_transmission": tem00_throughput,
             "tem00_purity": purity,
+            "mx2_estimate": mx2,
+            "my2_estimate": my2,
+            "m2_average_estimate": mavg2,
             "score_purity_times_transmission": score,
         }
         for key, power in sorted(projections.items()):
@@ -503,6 +552,13 @@ def main() -> None:
         np.asarray(tem00_efficiency),
         np.asarray(tem00_purity),
         output_dir / "spatial_filter_sweep.png",
+    )
+    plot_m2_vs_purity(
+        np.asarray(tem00_purity),
+        np.asarray(transmitted_mx2),
+        np.asarray(transmitted_my2),
+        np.asarray(transmitted_mavg2),
+        output_dir / "m2_vs_mode_purity.png",
     )
 
     x_um = x * 1e6
@@ -554,6 +610,9 @@ def main() -> None:
             }
         )
     save_csv(enclosed_rows, output_dir / "focal_plane_enclosed_power.csv")
+
+    input_mode_powers = {(component.nx, component.ny): component.power_fraction for component in components}
+    input_mx2, input_my2, input_mavg2 = mode_powers_to_m2(input_mode_powers)
 
     wavelength = args.wavelength_nm * 1e-9
     objective_focal_length = args.objective_focal_length_mm * 1e-3
@@ -643,6 +702,9 @@ def main() -> None:
         f"Input mode mixture: {args.modes}",
         f"Fourier-plane waist: {args.waist_um:.2f} um",
         f"Best pinhole radius by purity*transmission score: {best_radius * 1e6:.2f} um",
+        f"Input beam estimated Mx^2: {input_mx2:.3f}",
+        f"Input beam estimated My^2: {input_my2:.3f}",
+        f"Input beam estimated average M^2: {input_mavg2:.3f}",
         f"Radius for 50% enclosed total power: {radius_50_um:.2f} um",
         f"Radius for 80% enclosed total power: {radius_80_um:.2f} um",
         f"Radius for 95% enclosed total power: {radius_95_um:.2f} um",
@@ -653,6 +715,7 @@ def main() -> None:
         "Generated files:",
         "- spatial_filter_sweep.csv",
         "- spatial_filter_sweep.png",
+        "- m2_vs_mode_purity.png",
         "- spatial_filter_example_fields.png",
         "- focal_plane_mode_distribution.png",
         "- focal_plane_enclosed_power.csv",
