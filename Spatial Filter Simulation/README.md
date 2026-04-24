@@ -139,6 +139,98 @@ Outputs are written to `output/`:
 - `mode_purity_vs_focus_spot_20mm_objective.png`
 - `README_results.txt`
 
+## How To Read The Figures
+
+### `spatial_filter_sweep.png`
+
+This figure is the main tradeoff plot for choosing a pinhole radius.
+
+- the top panel shows total transmission through the pinhole
+- the middle panel shows how much of the original `TEM00` survives
+- the bottom panel shows the purity of the transmitted beam
+
+Typical interpretation:
+
+- moving to a larger pinhole usually increases throughput
+- moving to a smaller pinhole usually improves filtering but throws away more light
+- the useful design region is usually where purity is already high but transmission has not collapsed too much
+
+If the best radius lands at the edge of the sweep range, that means the sweep should be extended before treating the result as final.
+
+### `spatial_filter_example_fields.png`
+
+This figure compares:
+
+- the original focal-plane intensity
+- the pinhole mask
+- the transmitted intensity after clipping
+
+It is useful for a quick visual sanity check:
+
+- whether the selected pinhole is centered correctly
+- whether the filter is cutting into the main lobe
+- whether obvious higher-order side lobes are being removed
+
+### `focal_plane_mode_distribution.png`
+
+This is the most direct figure for choosing a pinhole size from the spot geometry.
+
+It shows the focal-plane intensity map with candidate pinhole radii drawn on top.
+
+Use it to judge:
+
+- how tightly concentrated the main lobe is
+- whether higher-order mode content sits outside the central spot
+- whether a given pinhole radius mostly passes the bright core or also includes outer structure
+
+In practice, this is the figure to compare against available commercial pinhole diameters.
+
+### `focal_plane_enclosed_power.png`
+
+This plot shows enclosed power fraction versus pinhole radius.
+
+- one curve is the total mixed beam
+- one curve is the ideal `TEM00` contribution alone
+- the vertical marker shows the current best-radius choice from the script's score
+
+This figure helps answer:
+
+- what radius passes `50%`, `80%`, or `95%` of the focal-plane power?
+- how much larger the mixed beam is than the clean `TEM00` core?
+- whether a candidate pinhole is acting mostly as a cleanup filter or mostly as a throughput limiter
+
+If the total-beam curve rises much more slowly than the `TEM00` curve, that is a sign that higher-order content is spread farther from the center and can in principle be filtered away.
+
+### `mode_purity_vs_focus_spot_20mm_objective.png`
+
+This figure connects spatial filtering to the focusing optic.
+
+- the top panel shows the best achievable `TEM00` purity after optimizing pinhole radius
+- the middle panel shows the corresponding best `TEM00` transmission
+- the bottom panel shows the beam radius required on the `20 mm` objective to produce that focused spot size
+
+This is mainly a design-space figure:
+
+- if you can only put a certain beam size on the objective, it tells you what focal-plane spot size to expect
+- if you want a certain spot size at the pinhole, it tells you what beam size is needed before the objective
+
+If the best purity curve is nearly flat, that means this simplified model is mostly scale-invariant and pinhole sizing matters more than the absolute spot size.
+
+## Practical Pinhole Selection
+
+For real hardware, a useful workflow is:
+
+1. look at `focal_plane_mode_distribution.png` to estimate the central bright-core radius
+2. check `focal_plane_enclosed_power.png` to see what fraction of power falls inside that radius
+3. compare with `spatial_filter_sweep.png` to see the purity versus throughput tradeoff
+4. choose the nearest real pinhole diameter that gives acceptable loss and acceptable cleanup
+
+In other words:
+
+- if you care most about purity, bias smaller
+- if you care most about throughput, bias larger
+- if the beam is sensitive to alignment, avoid choosing a radius that only barely clears the central lobe
+
 ## Notes
 
 - This is a fast design-level simulation, not a full diffraction-limited hardware model.
