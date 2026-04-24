@@ -110,6 +110,89 @@ Those per-mode fractions help identify the likely physical origin of the distort
 - `TEM20` or `TEM02` growth often points to waist mismatch, lensing, or symmetric clipping
 - `TEM11` growth can suggest more mixed or asymmetric perturbations
 
+## Why These Effects Cause Mode Mixing
+
+The OPO cavity supports a particular transverse eigenmode.
+
+If the circulating field matches that eigenmode well, the cavity stays close to pure `TEM00`.
+If something changes the transverse phase, beam centering, waist size, symmetry, or clipping boundary, the field after one round trip no longer matches a single Gaussian mode exactly.
+The result is that the field must be described as a sum of `TEM00` plus higher-order transverse modes.
+
+In that sense, mode mixing is fundamentally a mode-overlap problem:
+
+```text
+perfect overlap with the cavity eigenmode -> mostly TEM00
+imperfect overlap or broken symmetry -> power leaks into higher-order modes
+```
+
+### Mirror Tilt
+
+Mirror tilt changes the cavity axis and adds a transverse phase gradient across the beam.
+
+That kind of perturbation is odd in space, so it tends to couple the symmetric `TEM00` mode into odd modes such as:
+
+- `TEM10`
+- `TEM01`
+
+This is why tilt-like errors are often associated with first-order transverse modes appearing first.
+
+### Thermal Lensing
+
+Heating in the nonlinear crystal changes the refractive index and acts like an additional lens inside the cavity.
+
+That changes:
+
+- waist size
+- waist position
+- overall mode-matching condition
+
+Even if the cavity remains centered, the fundamental Gaussian of the original cavity is no longer the exact eigenmode of the perturbed cavity.
+That kind of symmetric mismatch often couples `TEM00` into even modes such as:
+
+- `TEM20`
+- `TEM02`
+
+### Aperture Clipping
+
+Clipping truncates part of the spatial field.
+
+A clipped Gaussian is not itself a pure Gaussian mode anymore.
+Sharp edges in the transverse profile require a combination of many Hermite-Gaussian modes to represent the field, so clipping naturally creates higher-order mode content.
+
+In practice, clipping can come from:
+
+- mirror clear aperture
+- crystal mount geometry
+- irises
+- housing edges
+- beam walking off-center through a finite opening
+
+### Decenter And Displacement
+
+A displaced Gaussian beam is not equal to the centered cavity `TEM00` mode.
+When expanded in the centered cavity basis, it becomes a mixture of the fundamental and higher-order modes.
+
+That is why beam walkoff, mis-centering, or cavity-axis shifts often show up as mode mixing even without obvious clipping.
+
+### Astigmatism And Asymmetry
+
+If the cavity focuses differently in x and y, or if the crystal introduces anisotropic lensing, the transverse mode is no longer described by one circularly symmetric Gaussian.
+
+This breaks the simple `TEM00` condition and can populate different x and y higher-order modes differently.
+
+### Pump Mismatch In A Real OPO
+
+Although the current script is a cavity perturbation model rather than a full nonlinear gain model, in a real OPO the pump also matters.
+
+If the pump does not overlap well with the cavity fundamental mode, the nonlinear interaction can preferentially reinforce distorted or higher-order spatial structure.
+So poor pump matching can indirectly increase effective mode mixing even when the passive cavity alignment looks acceptable.
+
+### Near-Degenerate Cavities
+
+If the cavity geometry makes the transverse-mode frequency spacing small, different modes become closer to resonance.
+
+Then weak perturbations are more effective at mixing them, because the cavity is less selective about which transverse mode it supports.
+
 ## Interpreting The Default Run
 
 With the current default settings, the simulator is intended to start from a reasonably healthy cavity.
