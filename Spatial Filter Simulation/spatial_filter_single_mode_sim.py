@@ -366,6 +366,12 @@ def plot_m2_vs_purity(
     plt.close(fig)
 
 
+def gaussian_enclosed_power_fraction(radius: float, waist: float) -> float:
+    if waist <= 0:
+        return 0.0
+    return 1.0 - math.exp(-2.0 * (radius**2) / (waist**2))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -471,6 +477,29 @@ def main() -> None:
         type=int,
         default=120,
         help="Number of radii used for enclosed-power and focal-plane sizing outputs.",
+    )
+    parser.add_argument(
+        "--input-beam-size-mm",
+        type=float,
+        default=3.0,
+        help="Beam size on the focusing optic in mm.",
+    )
+    parser.add_argument(
+        "--input-beam-size-is-diameter",
+        action="store_true",
+        help="Interpret --input-beam-size-mm as beam diameter instead of 1/e field radius.",
+    )
+    parser.add_argument(
+        "--build-focal-length-mm",
+        type=float,
+        default=250.0,
+        help="Actual focusing lens/objective focal length in mm for the build calculator.",
+    )
+    parser.add_argument(
+        "--build-pinhole-diameter-um",
+        type=float,
+        default=20.0,
+        help="Actual pinhole diameter in um for the build calculator.",
     )
     args = parser.parse_args()
 
@@ -697,6 +726,34 @@ def main() -> None:
         output_dir / "mode_purity_vs_focus_spot_20mm_objective.png",
     )
 
+    build_focal_length_m = args.build_focal_length_mm * 1e-3
+    build_pinhole_radius_um = 0.5 * args.build_pinhole_diameter_um
+    input_beam_radius_mm = (
+        0.5 * args.input_beam_size_mm if args.input_beam_size_is_diameter else args.input_beam_size_mm
+    )
+    input_beam_radius_m = input_beam_radius_mm * 1e-3
+    build_focus_radius_m = wavelength * build_focal_length_m / (math.pi * input_beam_radius_m)
+    build_focus_radius_um = build_focus_radius_m * 1e6
+    build_focus_diameter_um = 2.0 * build_focus_radius_um
+    build_tem00_fraction = gaussian_enclosed_power_fraction(
+        build_pinhole_radius_um * 1e-6, build_focus_radius_m
+    )
+    build_pinhole_to_waist_ratio = build_pinhole_radius_um / build_focus_radius_um if build_focus_radius_um > 0 else 0.0
+
+    build_summary_lines = [
+        "Specific Build Calculator",
+        f"Wavelength: {args.wavelength_nm:.2f} nm",
+        f"Input beam size on optic: {args.input_beam_size_mm:.3f} mm "
+        + ("(treated as diameter)" if args.input_beam_size_is_diameter else "(treated as 1/e field radius)"),
+        f"Focal length: {args.build_focal_length_mm:.2f} mm",
+        f"Pinhole diameter: {args.build_pinhole_diameter_um:.2f} um",
+        f"Ideal TEM00 focus radius: {build_focus_radius_um:.2f} um",
+        f"Ideal TEM00 focus diameter: {build_focus_diameter_um:.2f} um",
+        f"Pinhole radius / ideal TEM00 waist ratio: {build_pinhole_to_waist_ratio:.3f}",
+        f"Ideal TEM00 power transmitted by pinhole: {100.0 * build_tem00_fraction:.2f} %",
+    ]
+    (output_dir / "build_case_summary.txt").write_text("\n".join(build_summary_lines) + "\n", encoding="utf-8")
+
     summary_lines = [
         "Spatial Filter Single-Mode Simulation",
         f"Input mode mixture: {args.modes}",
@@ -712,6 +769,14 @@ def main() -> None:
         f"Objective focal length: {args.objective_focal_length_mm:.2f} mm",
         f"Wavelength: {args.wavelength_nm:.2f} nm",
         "",
+        "Specific build calculator:",
+        f"Input beam size on optic: {args.input_beam_size_mm:.3f} mm "
+        + ("(diameter)" if args.input_beam_size_is_diameter else "(1/e field radius)"),
+        f"Build focal length: {args.build_focal_length_mm:.2f} mm",
+        f"Build pinhole diameter: {args.build_pinhole_diameter_um:.2f} um",
+        f"Ideal TEM00 focus radius for build: {build_focus_radius_um:.2f} um",
+        f"Ideal TEM00 power through build pinhole: {100.0 * build_tem00_fraction:.2f} %",
+        "",
         "Generated files:",
         "- spatial_filter_sweep.csv",
         "- spatial_filter_sweep.png",
@@ -720,6 +785,7 @@ def main() -> None:
         "- focal_plane_mode_distribution.png",
         "- focal_plane_enclosed_power.csv",
         "- focal_plane_enclosed_power.png",
+        "- build_case_summary.txt",
         "- mode_purity_vs_focus_spot_20mm_objective.csv",
         "- mode_purity_vs_focus_spot_20mm_objective.png",
     ]

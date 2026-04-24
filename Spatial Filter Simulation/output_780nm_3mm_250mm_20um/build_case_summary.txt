@@ -1,0 +1,9 @@
+Specific Build Calculator
+Wavelength: 780.00 nm
+Input beam size on optic: 3.000 mm (treated as diameter)
+Focal length: 250.00 mm
+Pinhole diameter: 20.00 um
+Ideal TEM00 focus radius: 41.38 um
+Ideal TEM00 focus diameter: 82.76 um
+Pinhole radius / ideal TEM00 waist ratio: 0.242
+Ideal TEM00 power transmitted by pinhole: 11.02 %

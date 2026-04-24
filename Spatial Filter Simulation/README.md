@@ -183,10 +183,33 @@ Outputs are written to `output/`:
 - `focal_plane_mode_distribution.png`
 - `focal_plane_enclosed_power.csv`
 - `focal_plane_enclosed_power.png`
+- `build_case_summary.txt`
 - `mode_purity_vs_focus_spot_20mm_objective.csv`
 - `mode_purity_vs_focus_spot_20mm_objective.png`
 - `m2_vs_mode_purity.png`
 - `README_results.txt`
+
+You can also run a specific hardware case by providing:
+
+- wavelength
+- beam size on the focusing optic
+- whether that beam size is a diameter or radius
+- actual focusing focal length
+- actual pinhole diameter
+
+Example:
+
+```powershell
+python .\spatial_filter_single_mode_sim.py `
+  --wavelength-nm 780 `
+  --input-beam-size-mm 3 `
+  --input-beam-size-is-diameter `
+  --build-focal-length-mm 250 `
+  --build-pinhole-diameter-um 20 `
+  --output-dir .\output_780nm_3mm_250mm_20um
+```
+
+That build-specific summary is written to `build_case_summary.txt`.
 
 ## Figure Links
 
