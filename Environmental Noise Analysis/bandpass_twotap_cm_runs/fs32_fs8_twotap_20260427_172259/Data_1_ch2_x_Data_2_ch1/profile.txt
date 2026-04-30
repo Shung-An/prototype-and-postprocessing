@@ -1,0 +1,4 @@
+frame 1 start timestamp: 17:23:00.000
+frame 2 start timestamp: 17:23:00.013
+frame 3 start timestamp: 17:23:00.027
+frame 4 start timestamp: 17:23:00.041

@@ -1,0 +1,67 @@
+{
+  "GeneratedBy": "bandpass_twotap_cm_pipeline.py",
+  "CreatedAt": "2026-04-27T17:23:00",
+  "SourceFiles": [
+    "C:\\Quantum Squeezing\\Quantum-Measurement-Software\\Quantum Measurement UI\\bin\\Debug\\net8.0-windows7.0\\Data_1.dat",
+    "C:\\Quantum Squeezing\\Quantum-Measurement-Software\\Quantum Measurement UI\\bin\\Debug\\net8.0-windows7.0\\Data_2.dat"
+  ],
+  "CrossBoardPair": {
+    "FileA": "Data_1.dat",
+    "ChannelA": 2,
+    "FileB": "Data_2.dat",
+    "ChannelB": 1
+  },
+  "Processing": {
+    "SampleRateHz": 600000000.0,
+    "BandpassLowHz": 18750000.0,
+    "BandpassHighHz": 75000000.0,
+    "FirTaps": 513,
+    "TwoTapDelayFrames": 8,
+    "DemodulationWindow": 8,
+    "SegmentFrames": 16,
+    "TransferSamplesPerBoard": 1048576,
+    "PaddingSamplesSkippedPerTransfer": 1024,
+    "CmFramesWritten": 4
+  },
+  "PhysicsData": {
+    "Power_mW_1": 0.0,
+    "Power_mW_2": 0.0,
+    "PowerDetectorAttenuatorApplied": false,
+    "PowerDetectorAttenuatorCount": 0,
+    "PowerDetectorAttenuatorEach_dB": 0.0,
+    "PowerDetectorAttenuatorTotal_dB": 0.0,
+    "PowerDetectorAttenuatorCorrectionFactor": 1.0,
+    "Sensitivity_V_photon": null,
+    "ShotNoise1_V": null,
+    "ShotNoise2_V": null,
+    "SignalLevel_V2_rtHz": null,
+    "ConversionFactor_V2_rad2": null,
+    "IsDarkNoiseRun": true,
+    "DarkNoiseLabel": "Dark noise",
+    "DarkNoiseReason": "port power is zero",
+    "DisplayAmplitudeUnit": "V^2",
+    "ShotNoiseResult_V2_rtHz": 10001.0,
+    "ScanRange_mm": 0.0,
+    "ScanMin_mm": 25.058,
+    "ScanMax_mm": 25.058
+  },
+  "PostProcessing": {
+    "Pipeline": "cm_pipeline_all_in_one.py",
+    "CacheSignature": {
+      "version": "2026-04-27-skip-fft-analysis-v1",
+      "detector_area_scale": 5.364418029785156e-11,
+      "attenuator_assumption": false,
+      "enable_dropped_window_gating": false,
+      "enable_saturation_cleanup": false,
+      "enable_variance_gating": true,
+      "enable_channel_health_gating": false,
+      "enable_even_frames_only": false,
+      "enable_fft_analysis": false,
+      "bin_mm": 0.1,
+      "mm_to_ps": 6.6,
+      "saturation_threshold_ch11": 3e-07,
+      "shot_noise_result_v2_threshold": 10000
+    },
+    "ProcessedAt": "2026-04-27T17:23:21"
+  }
+}
