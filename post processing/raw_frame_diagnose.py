@@ -530,7 +530,7 @@ def select_run_folder() -> str:
     root.withdraw()
     selected = filedialog.askdirectory(
         title="Select the Data Run Folder",
-        initialdir=str(Path(r"D:\Quantum Squeezing Project\DataFiles")),
+        initialdir=str(Path(r"C:\Quantum Squeezing\Quantum-Measurement-Software\DataFiles")),
     )
     root.destroy()
     if not selected:

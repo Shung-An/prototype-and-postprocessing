@@ -31,7 +31,7 @@ BIN_MM = 0.1
 # Attenuator correction is applied separately from metadata/assumption below.
 DETECTOR_AREA_SCALE = (0.24**2) / (32768**2)
 # Bump this when a code or assumption change should force existing runs to rebuild once.
-PIPELINE_CACHE_VERSION = "2026-04-23-no-attenuator-scale-v1"
+PIPELINE_CACHE_VERSION = "2026-04-30-aggressive-low-std-gating-v1"
 # Conversion factor from distance in millimeters to time in picoseconds for this setup.
 MM_TO_PS = 6.6
 # Time per processed frame, in seconds:
@@ -46,9 +46,14 @@ MAX_LINE_PLOT_POINTS = 50_000
 
 ENABLE_DROPPED_WINDOW_GATING = False
 ENABLE_SATURATION_CLEANUP = False
-ENABLE_VARIANCE_GATING = False
+ENABLE_VARIANCE_GATING = True
+STD_STATE_TO_KEEP = "low"
+STD_GATE_MODE = "aggressive_low_core"
+STD_LOW_STATE_MAD_SIGMA = 2.0
+STD_LOW_STATE_QUANTILE_CAP = 0.90
 ENABLE_CHANNEL_HEALTH_GATING = False
 ENABLE_EVEN_FRAMES_ONLY = False
+ENABLE_FFT_ANALYSIS = False
 ASSUME_POWER_DETECTOR_ATTENUATOR_APPLIED = False
 
 REQUIRED_PIPELINE_OUTPUTS = [
@@ -120,6 +125,7 @@ PAIRS = np.array(
 # the measurement rather than normal frame-to-frame variation.
 # Cap the number of displayed critical pairs to keep the summary plots readable.
 CRITICAL_PAIR_MAX_COUNT = 8
+DATAFILES_DEFAULT_DIR = Path(r"C:\Quantum Squeezing\Quantum-Measurement-Software\DataFiles")
 
 
 @dataclass
@@ -535,8 +541,13 @@ def pipeline_cache_signature() -> dict[str, object]:
         "enable_dropped_window_gating": ENABLE_DROPPED_WINDOW_GATING,
         "enable_saturation_cleanup": ENABLE_SATURATION_CLEANUP,
         "enable_variance_gating": ENABLE_VARIANCE_GATING,
+        "std_state_to_keep": STD_STATE_TO_KEEP,
+        "std_gate_mode": STD_GATE_MODE,
+        "std_low_state_mad_sigma": STD_LOW_STATE_MAD_SIGMA,
+        "std_low_state_quantile_cap": STD_LOW_STATE_QUANTILE_CAP,
         "enable_channel_health_gating": ENABLE_CHANNEL_HEALTH_GATING,
         "enable_even_frames_only": ENABLE_EVEN_FRAMES_ONLY,
+        "enable_fft_analysis": ENABLE_FFT_ANALYSIS,
         "bin_mm": BIN_MM,
         "mm_to_ps": MM_TO_PS,
         "saturation_threshold_ch11": SATURATION_THRESHOLD_CH11,
@@ -611,17 +622,119 @@ def save_figure_with_provenance(
     fig.savefig(output_path, metadata=figure_provenance_metadata(run_folder, extra))
 
 
-def save_variance_gating_check(run_folder: Path, frame_rms: np.ndarray, cutoff: float) -> None:
+def save_variance_gating_check(
+    run_folder: Path,
+    frame_rms: np.ndarray,
+    cutoff: float,
+    keep_mask: np.ndarray | None = None,
+    state_to_keep: str = STD_STATE_TO_KEEP,
+    state_split_cutoff: float | None = None,
+) -> None:
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.hist(frame_rms, bins=100, color="#3d6ea8")
+    if keep_mask is None:
+        ax.hist(frame_rms, bins=100, color="#3d6ea8")
+    else:
+        rejected_mask = ~keep_mask
+        ax.hist(
+            frame_rms[keep_mask],
+            bins=100,
+            color="#2c7fb8",
+            alpha=0.85,
+            label=f"Kept {state_to_keep} state",
+        )
+        if np.any(rejected_mask):
+            ax.hist(
+                frame_rms[rejected_mask],
+                bins=100,
+                color="#d95f0e",
+                alpha=0.55,
+                label="Rejected state",
+            )
     ax.axvline(cutoff, color="#c0392b", linestyle="--", linewidth=2, label="Cutoff")
+    if state_split_cutoff is not None and abs(state_split_cutoff - cutoff) > 1e-12:
+        ax.axvline(state_split_cutoff, color="#444444", linestyle=":", linewidth=1.8, label="Low/high split")
     ax.set_xlabel("Frame RMS")
     ax.set_ylabel("Count")
-    ax.set_title("Distribution of Frame Energy (Auto-Threshold)")
+    ax.set_title("Distribution of Frame Energy (Std-State Gate)")
     ax.legend()
     fig.tight_layout()
     save_figure_with_provenance(fig, run_folder / "variance_gating_check.png", run_folder)
     plt.close(fig)
+
+
+def robust_sigma(values: np.ndarray) -> float:
+    if values.size == 0:
+        return math.nan
+    median = float(np.median(values))
+    mad = float(np.median(np.abs(values - median)))
+    sigma = 1.4826 * mad
+    if sigma > 0 and np.isfinite(sigma):
+        return sigma
+    return float(np.std(values))
+
+
+def std_state_cutoff(frame_std: np.ndarray, state_split_cutoff: float, state_to_keep: str) -> float:
+    state = state_to_keep.strip().lower()
+    mode = STD_GATE_MODE.strip().lower()
+    if mode in {"two_state", "otsu", "split"}:
+        return state_split_cutoff
+
+    if mode != "aggressive_low_core" or state != "low":
+        return state_split_cutoff
+
+    low_values = frame_std[frame_std < state_split_cutoff]
+    if low_values.size < 8:
+        return state_split_cutoff
+
+    median = float(np.median(low_values))
+    sigma = robust_sigma(low_values)
+    mad_cutoff = median + STD_LOW_STATE_MAD_SIGMA * sigma
+    quantile_cutoff = float(np.quantile(low_values, STD_LOW_STATE_QUANTILE_CAP))
+    return min(state_split_cutoff, mad_cutoff, quantile_cutoff)
+
+
+def std_state_keep_mask(frame_std: np.ndarray, cutoff: float, state_to_keep: str) -> np.ndarray:
+    state = state_to_keep.strip().lower()
+    if state == "low":
+        return frame_std < cutoff
+    if state == "high":
+        return frame_std >= cutoff
+    raise ValueError(f"Unsupported STD_STATE_TO_KEEP value: {state_to_keep!r}. Use 'low' or 'high'.")
+
+
+def save_std_state_gating_csv(
+    run_folder: Path,
+    frame_std: np.ndarray,
+    cutoff: float,
+    keep_mask: np.ndarray,
+    state_to_keep: str,
+) -> None:
+    with (run_folder / "std_state_gating.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "frame_index_after_initial_filters",
+                "frame_number_1based_after_initial_filters",
+                "frame_std",
+                "std_cutoff",
+                "assigned_state",
+                "kept",
+                "state_to_keep",
+            ]
+        )
+        for idx, (std_value, kept) in enumerate(zip(frame_std, keep_mask, strict=False)):
+            assigned_state = "low" if std_value < cutoff else "high"
+            writer.writerow(
+                [
+                    idx,
+                    idx + 1,
+                    f"{std_value:.12g}",
+                    f"{cutoff:.12g}",
+                    assigned_state,
+                    int(bool(kept)),
+                    state_to_keep,
+                ]
+            )
 
 
 def save_histogram(run_folder: Path, x: np.ndarray) -> None:
@@ -1490,11 +1603,32 @@ def run_pipeline(
         pos_on_cm = pos_on_cm[keep]
         t_datetimes = [dt for dt, k in zip(t_datetimes, keep, strict=False) if bool(k)]
 
-    frame_rms = cm.std(axis=1)
-    rms_cutoff = otsu_like_threshold(frame_rms)
+    frame_rms = raw_cm.std(axis=1)
+    state_split_cutoff = otsu_like_threshold(frame_rms)
+    rms_cutoff = std_state_cutoff(frame_rms, state_split_cutoff, STD_STATE_TO_KEEP)
     if ENABLE_VARIANCE_GATING:
-        save_variance_gating_check(run_folder, frame_rms, rms_cutoff)
-        keep = frame_rms >= rms_cutoff
+        keep = std_state_keep_mask(frame_rms, rms_cutoff, STD_STATE_TO_KEEP)
+        save_variance_gating_check(
+            run_folder,
+            frame_rms,
+            rms_cutoff,
+            keep,
+            STD_STATE_TO_KEEP,
+            state_split_cutoff=state_split_cutoff,
+        )
+        save_std_state_gating_csv(run_folder, frame_rms, rms_cutoff, keep, STD_STATE_TO_KEEP)
+        print(
+            f"Std-state gate kept {int(np.count_nonzero(keep))}/{keep.size} frames "
+            f"from the {STD_STATE_TO_KEEP!r} state "
+            f"(gate cutoff={rms_cutoff:.6g}, low/high split={state_split_cutoff:.6g}, mode={STD_GATE_MODE}).",
+            flush=True,
+        )
+        if not np.any(keep):
+            raise ValueError(
+                f"Std-state gate rejected every frame. Check STD_STATE_TO_KEEP={STD_STATE_TO_KEEP!r} "
+                f"and cutoff={rms_cutoff:.6g}."
+            )
+        raw_cm = raw_cm[keep]
         cm = cm[keep]
         t_seconds = t_seconds[keep]
         pos_on_cm = pos_on_cm[keep]
@@ -1579,7 +1713,8 @@ def run_pipeline(
     save_semilogy_grouped_64channels(run_folder, cm, conversion_factor, display_in_v2)
     save_loglog_eval_pairs_runmean(run_folder, cm, pairs, labels, conversion_factor, display_in_v2)
     save_grouped_loglog_convergence(run_folder, bin_vals, bin_cumsums, labels, len(labels), display_in_v2)
-    save_variation_and_fft(run_folder, ts, counts, bin_cumsums, labels, critical_keep_indices, display_in_v2)
+    if ENABLE_FFT_ANALYSIS:
+        save_variation_and_fft(run_folder, ts, counts, bin_cumsums, labels, critical_keep_indices, display_in_v2)
     save_signal_emergence_movie(run_folder, ts, counts, bin_cumsums, labels, critical_keep_indices, display_in_v2)
     update_metadata_json(run_folder, meta)
     update_datafiles_browser_index(run_folder)
@@ -1632,7 +1767,7 @@ def main() -> None:
         root.withdraw()
         selected = filedialog.askdirectory(
             title="Select the Data Run Folder",
-            initialdir=str(Path(r"D:\Quantum Squeezing Project\DataFiles")),
+            initialdir=str(DATAFILES_DEFAULT_DIR),
         )
         root.destroy()
         if not selected:

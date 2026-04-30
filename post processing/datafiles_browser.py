@@ -57,6 +57,7 @@ DIAGONAL_OFFSET_PLOT_NAMES = ("diagonal_offset_matrix_urad2.png", "diagonal_offs
 RAW_STD_PLOT_NAMES = ("raw_std_over_time.png", "raw_std_within_parity.png")
 CONFIG_PATH = Path(tempfile.gettempdir()) / "quantum_datafiles_browser_config.json"
 INDEX_DB_PATH = Path(tempfile.gettempdir()) / "quantum_datafiles_browser_index.sqlite3"
+INDEX_SCHEMA_VERSION = 2
 FILTER_DEBOUNCE_MS = 180
 PREVIEW_RESIZE_DEBOUNCE_MS = 120
 PREVIEW_SIZE_BUCKET_PX = 64
@@ -80,6 +81,9 @@ class PhysicsData:
     environment_temperature_c: float | None = None
     sensitivity_v_photon: float | None = None
     shot_noise_urad2_rthz: float | None = None
+    shot_noise_v2_rthz: float | None = None
+    shot_noise_unit: str = ""
+    is_dark_noise_run: bool = False
     scan_range_mm: float | None = None
     scan_min_mm: float | None = None
     scan_max_mm: float | None = None
@@ -132,10 +136,33 @@ class RunRecord:
 
     @property
     def shot_noise_display(self) -> str:
-        value = self.physics.shot_noise_urad2_rthz
-        if value is None:
-            return "-"
-        return f"{value:.2f}"
+        value = self.shot_noise_value_display
+        unit = self.shot_noise_unit_display
+        if value == "-":
+            return value
+        return f"{value} {unit}" if unit else value
+
+    @property
+    def shot_noise_value_display(self) -> str:
+        unit = self.physics.shot_noise_unit.strip().lower()
+        if self.physics.shot_noise_v2_rthz is not None and (self.physics.is_dark_noise_run or unit.startswith("v")):
+            return f"{self.physics.shot_noise_v2_rthz:.3g}"
+        if self.physics.shot_noise_urad2_rthz is not None:
+            return f"{self.physics.shot_noise_urad2_rthz:.2f}"
+        if self.physics.shot_noise_v2_rthz is not None:
+            return f"{self.physics.shot_noise_v2_rthz:.3g}"
+        return "-"
+
+    @property
+    def shot_noise_unit_display(self) -> str:
+        unit = self.physics.shot_noise_unit.strip()
+        if self.physics.shot_noise_v2_rthz is not None and (self.physics.is_dark_noise_run or unit.lower().startswith("v")):
+            return "V^2/rtHz"
+        if self.physics.shot_noise_urad2_rthz is not None:
+            return "urad^2/rtHz"
+        if self.physics.shot_noise_v2_rthz is not None:
+            return "V^2/rtHz"
+        return unit
 
     @property
     def sample_power_display(self) -> str:
@@ -176,7 +203,8 @@ def safe_float(value: object) -> float | None:
     if value is None or value == "":
         return None
     try:
-        return float(value)
+        result = float(value)
+        return result if math.isfinite(result) else None
     except (TypeError, ValueError):
         return None
 
@@ -387,7 +415,8 @@ def load_run_record(final_result_path: Path) -> RunRecord:
                 )
             )
 
-            physics = payload.get("PhysicsData", {}) or {}
+            physics_value = payload.get("PhysicsData", {}) or {}
+            physics = physics_value if isinstance(physics_value, dict) else {}
             record.physics = PhysicsData(
                 sample_power_mw=first_matching_float(
                     payload,
@@ -432,7 +461,38 @@ def load_run_record(final_result_path: Path) -> RunRecord:
                     ],
                 ),
                 sensitivity_v_photon=safe_float(physics.get("Sensitivity_V_photon")),
-                shot_noise_urad2_rthz=safe_float(physics.get("ShotNoiseResult_urad2_rtHz")),
+                shot_noise_urad2_rthz=first_matching_float(
+                    payload,
+                    [
+                        ("PhysicsData", "ShotNoiseResult_urad2_rtHz"),
+                        ("ShotNoiseResult_urad2_rtHz",),
+                    ],
+                ),
+                shot_noise_v2_rthz=first_matching_float(
+                    payload,
+                    [
+                        ("PhysicsData", "ShotNoiseResult_V2_rtHz"),
+                        ("ShotNoiseResult_V2_rtHz",),
+                    ],
+                ),
+                shot_noise_unit=safe_text(
+                    first_matching_value(
+                        payload,
+                        [
+                            ("PhysicsData", "DisplayAmplitudeUnit"),
+                            ("DisplayAmplitudeUnit",),
+                        ],
+                    )
+                ),
+                is_dark_noise_run=safe_bool(
+                    first_matching_value(
+                        payload,
+                        [
+                            ("PhysicsData", "IsDarkNoiseRun"),
+                            ("IsDarkNoiseRun",),
+                        ],
+                    )
+                ),
                 scan_range_mm=safe_float(physics.get("ScanRange_mm")),
                 scan_min_mm=safe_float(physics.get("ScanMin_mm")),
                 scan_max_mm=safe_float(physics.get("ScanMax_mm")),
@@ -446,6 +506,7 @@ def load_run_record(final_result_path: Path) -> RunRecord:
         record.folder_name,
         str(record.folder_path),
         record.sample,
+        record.exp_tag,
         record.description,
         record.tags_display,
         record.filename,
@@ -453,6 +514,7 @@ def load_run_record(final_result_path: Path) -> RunRecord:
         record.sample_power_display,
         record.port_power_display,
         record.environment_temperature_display_k,
+        record.shot_noise_display,
         "star" if record.star_measurement else "",
     ]
     record.search_blob = " ".join(part for part in search_parts if part).lower()
@@ -505,6 +567,9 @@ def ensure_index_db() -> None:
                 environment_temperature_c REAL,
                 sensitivity_v_photon REAL,
                 shot_noise_urad2_rthz REAL,
+                shot_noise_v2_rthz REAL,
+                shot_noise_unit TEXT NOT NULL DEFAULT '',
+                is_dark_noise_run INTEGER NOT NULL DEFAULT 0,
                 scan_range_mm REAL,
                 scan_min_mm REAL,
                 scan_max_mm REAL,
@@ -517,8 +582,25 @@ def ensure_index_db() -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
         if "exp_tag" not in columns:
             conn.execute("ALTER TABLE runs ADD COLUMN exp_tag TEXT NOT NULL DEFAULT ''")
+        if "shot_noise_v2_rthz" not in columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN shot_noise_v2_rthz REAL")
+        if "shot_noise_unit" not in columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN shot_noise_unit TEXT NOT NULL DEFAULT ''")
+        if "is_dark_noise_run" not in columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN is_dark_noise_run INTEGER NOT NULL DEFAULT 0")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_root_date ON runs(root_key, sortable_date DESC)")
         conn.execute("CREATE TABLE IF NOT EXISTS roots (root_key TEXT PRIMARY KEY, root_path TEXT NOT NULL, last_indexed_utc TEXT NOT NULL, run_count INTEGER NOT NULL)")
+        conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        schema_row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        current_schema = int(schema_row[0]) if schema_row and str(schema_row[0]).isdigit() else 0
+        if current_schema < INDEX_SCHEMA_VERSION:
+            conn.execute("DELETE FROM runs")
+            conn.execute("DELETE FROM roots")
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES ('schema_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(INDEX_SCHEMA_VERSION),),
+            )
 
 
 def _serialize_path(path: Path | None) -> str | None:
@@ -540,9 +622,9 @@ def upsert_run_record_in_db(root_path: Path, record: RunRecord) -> None:
                 diagonal_offset_path, raw_std_plot_path, metadata_path, sortable_date, sample,
                 exp_tag, description, tags_json, filename, duration, star_measurement, sample_power_mw,
                 power_mw_1, power_mw_2, environment_temperature_k, environment_temperature_c,
-                sensitivity_v_photon, shot_noise_urad2_rthz, scan_range_mm, scan_min_mm,
-                scan_max_mm, metadata_text, search_blob
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                sensitivity_v_photon, shot_noise_urad2_rthz, shot_noise_v2_rthz, shot_noise_unit,
+                is_dark_noise_run, scan_range_mm, scan_min_mm, scan_max_mm, metadata_text, search_blob
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(root_key, folder_path) DO UPDATE SET
                 folder_name=excluded.folder_name,
                 final_result_path=excluded.final_result_path,
@@ -566,6 +648,9 @@ def upsert_run_record_in_db(root_path: Path, record: RunRecord) -> None:
                 environment_temperature_c=excluded.environment_temperature_c,
                 sensitivity_v_photon=excluded.sensitivity_v_photon,
                 shot_noise_urad2_rthz=excluded.shot_noise_urad2_rthz,
+                shot_noise_v2_rthz=excluded.shot_noise_v2_rthz,
+                shot_noise_unit=excluded.shot_noise_unit,
+                is_dark_noise_run=excluded.is_dark_noise_run,
                 scan_range_mm=excluded.scan_range_mm,
                 scan_min_mm=excluded.scan_min_mm,
                 scan_max_mm=excluded.scan_max_mm,
@@ -597,6 +682,9 @@ def upsert_run_record_in_db(root_path: Path, record: RunRecord) -> None:
                 record.physics.environment_temperature_c,
                 record.physics.sensitivity_v_photon,
                 record.physics.shot_noise_urad2_rthz,
+                record.physics.shot_noise_v2_rthz,
+                record.physics.shot_noise_unit,
+                1 if record.physics.is_dark_noise_run else 0,
                 record.physics.scan_range_mm,
                 record.physics.scan_min_mm,
                 record.physics.scan_max_mm,
@@ -618,9 +706,9 @@ def write_runs_to_db(root_path: Path, runs: list[RunRecord]) -> None:
                 diagonal_offset_path, raw_std_plot_path, metadata_path, sortable_date, sample,
                 exp_tag, description, tags_json, filename, duration, star_measurement, sample_power_mw,
                 power_mw_1, power_mw_2, environment_temperature_k, environment_temperature_c,
-                sensitivity_v_photon, shot_noise_urad2_rthz, scan_range_mm, scan_min_mm,
-                scan_max_mm, metadata_text, search_blob
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                sensitivity_v_photon, shot_noise_urad2_rthz, shot_noise_v2_rthz, shot_noise_unit,
+                is_dark_noise_run, scan_range_mm, scan_min_mm, scan_max_mm, metadata_text, search_blob
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -648,6 +736,9 @@ def write_runs_to_db(root_path: Path, runs: list[RunRecord]) -> None:
                     run.physics.environment_temperature_c,
                     run.physics.sensitivity_v_photon,
                     run.physics.shot_noise_urad2_rthz,
+                    run.physics.shot_noise_v2_rthz,
+                    run.physics.shot_noise_unit,
+                    1 if run.physics.is_dark_noise_run else 0,
                     run.physics.scan_range_mm,
                     run.physics.scan_min_mm,
                     run.physics.scan_max_mm,
@@ -668,6 +759,51 @@ def write_runs_to_db(root_path: Path, runs: list[RunRecord]) -> None:
             """,
             (db_key, str(root_path), datetime.utcnow().isoformat(), len(runs)),
         )
+
+
+def _latest_index_source_state(root_path: Path) -> tuple[int, float]:
+    run_count = 0
+    newest_mtime = 0.0
+    for final_result_path in root_path.rglob(FINAL_RESULT_NAME):
+        if not final_result_path.is_file():
+            continue
+        run_count += 1
+        try:
+            newest_mtime = max(newest_mtime, final_result_path.stat().st_mtime)
+        except OSError:
+            pass
+        metadata_path = final_result_path.parent / "metadata.json"
+        if metadata_path.is_file():
+            try:
+                newest_mtime = max(newest_mtime, metadata_path.stat().st_mtime)
+            except OSError:
+                pass
+    return run_count, newest_mtime
+
+
+def is_index_stale(root_path: Path) -> bool:
+    ensure_index_db()
+    db_key = root_db_key(root_path)
+    with sqlite3.connect(INDEX_DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT last_indexed_utc, run_count FROM roots WHERE root_key = ?",
+            (db_key,),
+        ).fetchone()
+    if row is None:
+        return True
+
+    source_count, newest_mtime = _latest_index_source_state(root_path)
+    if source_count != int(row[1]):
+        return True
+    if newest_mtime <= 0:
+        return False
+
+    try:
+        last_indexed = datetime.fromisoformat(str(row[0]))
+    except ValueError:
+        return True
+    newest_source = datetime.utcfromtimestamp(newest_mtime)
+    return newest_source > last_indexed
 
 
 def load_runs_from_db(root_path: Path) -> list[RunRecord]:
@@ -708,6 +844,9 @@ def load_runs_from_db(root_path: Path) -> list[RunRecord]:
                     environment_temperature_c=row["environment_temperature_c"],
                     sensitivity_v_photon=row["sensitivity_v_photon"],
                     shot_noise_urad2_rthz=row["shot_noise_urad2_rthz"],
+                    shot_noise_v2_rthz=row["shot_noise_v2_rthz"],
+                    shot_noise_unit=row["shot_noise_unit"],
+                    is_dark_noise_run=bool(row["is_dark_noise_run"]),
                     scan_range_mm=row["scan_range_mm"],
                     scan_min_mm=row["scan_min_mm"],
                     scan_max_mm=row["scan_max_mm"],
@@ -753,6 +892,8 @@ def index_run_folder(run_folder: Path, root_path: Path | None = None) -> RunReco
 
 
 class DataFilesBrowser(tk.Tk):
+    TABLE_COLUMNS = ("star", "date", "sample", "exp_tag", "power", "sample_power", "temp", "duration", "shot_noise", "range", "run")
+
     COLUMN_TITLES = {
         "star": "Star",
         "date": "Date",
@@ -763,21 +904,35 @@ class DataFilesBrowser(tk.Tk):
         "sample_power": "Sample Power (mW)",
         "temp": "Temp (K)",
         "duration": "Elapsed",
-        "shot_noise": "Shot Noise",
+        "shot_noise": "Shot Noise (urad^2/rtHz)",
         "range": "Range (mm)",
     }
 
     COLUMN_WIDTHS = {
-        "star": 55,
-        "date": 140,
-        "run": 220,
-        "sample": 185,
-        "exp_tag": 130,
-        "power": 120,
-        "sample_power": 120,
+        "star": 62,
+        "date": 150,
+        "run": 180,
+        "sample": 170,
+        "exp_tag": 150,
+        "power": 140,
+        "sample_power": 155,
         "temp": 90,
-        "duration": 90,
-        "shot_noise": 95,
+        "duration": 92,
+        "shot_noise": 170,
+        "range": 105,
+    }
+
+    COLUMN_MIN_WIDTHS = {
+        "star": 50,
+        "date": 130,
+        "run": 130,
+        "sample": 90,
+        "exp_tag": 110,
+        "power": 115,
+        "sample_power": 135,
+        "temp": 75,
+        "duration": 78,
+        "shot_noise": 135,
         "range": 90,
     }
 
@@ -864,7 +1019,7 @@ class DataFilesBrowser(tk.Tk):
         self.banner_visible = True
         self.table_visible = True
         self.run_by_iid: dict[str, RunRecord] = {}
-        self.column_order = ["star", "date", "sample", "exp_tag", "power", "sample_power", "temp", "duration", "shot_noise", "range", "run"]
+        self.column_order = list(self.TABLE_COLUMNS)
         self.visible_columns = {"star", "date", "sample", "exp_tag", "power", "sample_power", "temp", "duration", "shot_noise", "range"}
 
         self.root_var = tk.StringVar(value=str(ROOT_DEFAULT))
@@ -945,6 +1100,19 @@ class DataFilesBrowser(tk.Tk):
         tk.Label(self.scan_filter_row, text="mm", bg="white", fg="#62777c").pack(side="left")
         self.scan_range_min_var.trace_add("write", lambda *_: self._schedule_filter())
         tk.Button(self.scan_filter_row, text="Columns...", command=self.open_column_manager).pack(side="right")
+        self.top_table_toggle_button = tk.Button(
+            self.scan_filter_row,
+            text="Hide Table",
+            width=12,
+            command=self.toggle_table,
+        )
+        self.top_table_toggle_button.pack(side="right", padx=(0, 8))
+        tk.Label(
+            self.scan_filter_row,
+            text="Shot Noise column: numeric value; optical unit urad^2/rtHz, dark unit V^2/rtHz",
+            bg="white",
+            fg="#62777c",
+        ).pack(side="right", padx=(0, 12))
         tk.Label(search_box, textvariable=self.count_var, bg="white", fg="#62777c").grid(row=1, column=1, rowspan=2, sticky="ne", padx=(12, 0))
 
         table_wrap = tk.Frame(self.left_panel, bg="white", highlightthickness=1, highlightbackground="#d8e0e1")
@@ -952,11 +1120,11 @@ class DataFilesBrowser(tk.Tk):
         table_wrap.rowconfigure(0, weight=1)
         table_wrap.columnconfigure(0, weight=1)
 
-        columns = tuple(self.column_order)
+        columns = self.TABLE_COLUMNS
         self.tree = ttk.Treeview(table_wrap, columns=columns, show="headings", height=24)
         for key in columns:
             self.tree.heading(key, text=self.COLUMN_TITLES[key], command=lambda column=key: self.sort_by_column(column))
-            self.tree.column(key, width=self.COLUMN_WIDTHS[key], anchor="w")
+            self.tree.column(key, width=self.COLUMN_WIDTHS[key], minwidth=self.COLUMN_MIN_WIDTHS[key], anchor="w", stretch=False)
         self._apply_display_columns()
         self.tree.grid(row=0, column=0, sticky="nsew")
         self.tree.bind("<<TreeviewSelect>>", self.on_select_run)
@@ -1069,6 +1237,14 @@ class DataFilesBrowser(tk.Tk):
             return
 
         if runs:
+            try:
+                stale = is_index_stale(root_path)
+            except Exception:
+                stale = True
+            if stale:
+                self.status_var.set("Index is older than the DataFiles folder. Rebuilding...")
+                self.rebuild_index()
+                return
             self.all_runs = runs
             self._schedule_filter(immediate=True)
             self.status_var.set(f"Loaded {len(runs)} runs from the SQLite index.")
@@ -1166,23 +1342,24 @@ class DataFilesBrowser(tk.Tk):
         for run in self.filtered_runs:
             iid = str(run.folder_path)
             self.run_by_iid[iid] = run
+            row_values = {
+                "star": "[x]" if run.star_measurement else "[ ]",
+                "date": run.sortable_date.strftime("%Y-%m-%d %H:%M"),
+                "sample": run.sample or "-",
+                "exp_tag": run.exp_tag or "-",
+                "power": run.port_power_display,
+                "sample_power": run.sample_power_display,
+                "temp": run.environment_temperature_display_k,
+                "duration": run.duration or "-",
+                "shot_noise": run.shot_noise_value_display,
+                "range": run.scan_range_display,
+                "run": run.folder_name,
+            }
             self.tree.insert(
                 "",
                 "end",
                 iid=iid,
-                values=(
-                    "[x]" if run.star_measurement else "[ ]",
-                    run.sortable_date.strftime("%Y-%m-%d %H:%M"),
-                    run.sample or "-",
-                    run.exp_tag or "-",
-                    run.port_power_display,
-                    run.sample_power_display,
-                    run.environment_temperature_display_k,
-                    run.duration or "-",
-                    run.shot_noise_display,
-                    run.scan_range_display,
-                    run.folder_name,
-                ),
+                values=tuple(row_values[column] for column in self.TABLE_COLUMNS),
             )
 
     def _sort_filtered_runs(self) -> None:
@@ -1218,6 +1395,8 @@ class DataFilesBrowser(tk.Tk):
             return (0, run.duration.lower())
         if column == "shot_noise":
             value = run.physics.shot_noise_urad2_rthz
+            if value is None:
+                value = run.physics.shot_noise_v2_rthz
             return (1 if value is None else 0, value if value is not None else 0.0)
         if column == "range":
             value = run.physics.scan_range_mm
@@ -1514,6 +1693,13 @@ class DataFilesBrowser(tk.Tk):
         dialog.columnconfigure(0, weight=1)
         dialog.rowconfigure(0, weight=1)
 
+        use_voltage_shot_noise = (
+            run.physics.shot_noise_v2_rthz is not None
+            and (run.physics.is_dark_noise_run or run.physics.shot_noise_unit.strip().lower().startswith("v"))
+        )
+        shot_noise_value = run.physics.shot_noise_v2_rthz if use_voltage_shot_noise else run.physics.shot_noise_urad2_rthz
+        shot_noise_label = "Shot Noise (V^2/rtHz)" if use_voltage_shot_noise else "Shot Noise (urad^2/rtHz)"
+
         fields: list[tuple[str, str, str]] = [
             ("Sample", "sample", run.sample),
             ("Exp Tag", "exp_tag", run.exp_tag),
@@ -1525,7 +1711,7 @@ class DataFilesBrowser(tk.Tk):
             ("Sample Power", "sample_power", "-" if run.physics.sample_power_mw is None else f"{run.physics.sample_power_mw:g}"),
             ("Port Power 1", "power_1", "-" if run.physics.power_mw_1 is None else f"{run.physics.power_mw_1:g}"),
             ("Port Power 2", "power_2", "-" if run.physics.power_mw_2 is None else f"{run.physics.power_mw_2:g}"),
-            ("Shot Noise", "shot_noise", "-" if run.physics.shot_noise_urad2_rthz is None else f"{run.physics.shot_noise_urad2_rthz:g}"),
+            (shot_noise_label, "shot_noise", "-" if shot_noise_value is None else f"{shot_noise_value:g}"),
             ("Scan Range", "scan_range", "-" if run.physics.scan_range_mm is None else f"{run.physics.scan_range_mm:g}"),
             ("Scan Min", "scan_min", "-" if run.physics.scan_min_mm is None else f"{run.physics.scan_min_mm:g}"),
             ("Scan Max", "scan_max", "-" if run.physics.scan_max_mm is None else f"{run.physics.scan_max_mm:g}"),
@@ -1585,7 +1771,13 @@ class DataFilesBrowser(tk.Tk):
                 physics["OnSamplePower_mW"] = self._entry_float_or_none(entry_vars["sample_power"].get())
                 physics["Power_mW_1"] = self._entry_float_or_none(entry_vars["power_1"].get())
                 physics["Power_mW_2"] = self._entry_float_or_none(entry_vars["power_2"].get())
-                physics["ShotNoiseResult_urad2_rtHz"] = self._entry_float_or_none(entry_vars["shot_noise"].get())
+                if use_voltage_shot_noise:
+                    physics["ShotNoiseResult_V2_rtHz"] = self._entry_float_or_none(entry_vars["shot_noise"].get())
+                    physics["DisplayAmplitudeUnit"] = "V^2"
+                    physics["IsDarkNoiseRun"] = True
+                else:
+                    physics["ShotNoiseResult_urad2_rtHz"] = self._entry_float_or_none(entry_vars["shot_noise"].get())
+                    physics["DisplayAmplitudeUnit"] = physics.get("DisplayAmplitudeUnit") or "urad^2"
                 physics["ScanRange_mm"] = self._entry_float_or_none(entry_vars["scan_range"].get())
                 physics["ScanMin_mm"] = self._entry_float_or_none(entry_vars["scan_min"].get())
                 physics["ScanMax_mm"] = self._entry_float_or_none(entry_vars["scan_max"].get())
@@ -1644,6 +1836,7 @@ class DataFilesBrowser(tk.Tk):
             run.sample_power_display,
             run.port_power_display,
             run.environment_temperature_display_k,
+            run.shot_noise_display,
             "star" if run.star_measurement else "",
         ]
         run.search_blob = " ".join(part for part in search_parts if part).lower()
@@ -1690,12 +1883,14 @@ class DataFilesBrowser(tk.Tk):
         right_widget = str(self.right_panel)
         if self.table_visible:
             self.table_toggle_button.configure(text="Hide Table")
+            self.top_table_toggle_button.configure(text="Hide Table")
             if left_widget not in panes:
                 self.body_pane.add(self.left_panel, before=self.right_panel, stretch="always", minsize=520)
             if right_widget not in self.body_pane.panes():
                 self.body_pane.add(self.right_panel, stretch="always", minsize=600)
         else:
             self.table_toggle_button.configure(text="Show Table")
+            self.top_table_toggle_button.configure(text="Show Table")
             if left_widget in panes:
                 self.body_pane.forget(self.left_panel)
 
