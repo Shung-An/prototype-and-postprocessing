@@ -1,0 +1,660 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DataFiles Browser</title>
+  <style>
+    :root {
+      --ink: #12353c;
+      --muted: #61767b;
+      --line: #d6e0e2;
+      --bg: #f3f1ea;
+      --paper: #ffffff;
+      --accent: #176f7a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    header {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: center;
+      background: var(--ink);
+      color: white;
+      padding: 14px 18px;
+    }
+    h1 { margin: 0; font-size: 22px; }
+    .root { color: #d6e8eb; font-size: 13px; margin-top: 4px; overflow-wrap: anywhere; }
+    button {
+      border: 1px solid #0f5962;
+      background: var(--accent);
+      color: white;
+      border-radius: 4px;
+      padding: 8px 11px;
+      font: inherit;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: white;
+      color: var(--ink);
+      border-color: #b9c8ca;
+    }
+    button:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+    input {
+      border: 1px solid #b9c8ca;
+      border-radius: 4px;
+      padding: 8px 9px;
+      font: inherit;
+      min-width: 0;
+    }
+    input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    .header-tools {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: end;
+    }
+    .tabs {
+      display: flex;
+      gap: 4px;
+      padding: 3px;
+      border: 1px solid rgba(255,255,255,0.28);
+      border-radius: 6px;
+      background: rgba(255,255,255,0.08);
+    }
+    .tab-button {
+      border-color: transparent;
+      background: transparent;
+      padding: 7px 10px;
+    }
+    .tab-button.active {
+      background: white;
+      color: var(--ink);
+      border-color: white;
+    }
+    main {
+      padding: 12px;
+      min-height: calc(100vh - 68px);
+    }
+    .tab-panel.hidden { display: none; }
+    .run-list-layout { display: block; }
+    .plots-layout {
+      display: grid;
+      grid-template-columns: minmax(270px, 360px) minmax(460px, 1fr);
+      gap: 12px;
+    }
+    .panel {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      min-width: 0;
+    }
+    .left {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      overflow: hidden;
+      height: calc(100vh - 92px);
+    }
+    .filters {
+      display: grid;
+      grid-template-columns: 1fr 110px auto auto;
+      gap: 8px;
+      padding: 12px;
+      border-bottom: 1px solid var(--line);
+      align-items: center;
+    }
+    .count { color: var(--muted); font-size: 13px; }
+    .table-wrap { overflow: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td {
+      border-bottom: 1px solid #e8eeee;
+      padding: 7px 8px;
+      text-align: left;
+      white-space: nowrap;
+    }
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: #edf5f6;
+      cursor: pointer;
+      color: var(--ink);
+    }
+    tr { cursor: pointer; }
+    tr:hover { background: #f5fafb; }
+    tr.active { background: #dff0f2; }
+    .compact-panel {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      overflow: hidden;
+      height: calc(100vh - 92px);
+    }
+    .compact-filters {
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+      border-bottom: 1px solid var(--line);
+    }
+    .compact-run-list {
+      overflow: auto;
+      padding: 6px;
+    }
+    .compact-run-item {
+      width: 100%;
+      border: 1px solid transparent;
+      border-radius: 5px;
+      background: transparent;
+      color: var(--ink);
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 8px;
+      align-items: start;
+      text-align: left;
+      padding: 9px;
+      margin: 0 0 4px;
+      cursor: pointer;
+    }
+    .compact-run-item:hover { background: #f5fafb; border-color: #dce8ea; }
+    .compact-run-item.active { background: #dff0f2; border-color: #b5d9de; }
+    .compact-main {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      font-weight: 700;
+    }
+    .compact-sub {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 4px;
+      overflow-wrap: anywhere;
+    }
+    .right {
+      padding: 12px;
+      overflow: auto;
+      height: calc(100vh - 92px);
+    }
+    .selected-header {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: start;
+      margin-bottom: 12px;
+    }
+    .selected-title { font-size: 20px; font-weight: 700; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: end; }
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(120px, 1fr));
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 8px;
+      background: #fbfcfc;
+    }
+    .metric span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 3px; }
+    .preview-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(220px, 1fr));
+      gap: 12px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fbfcfc;
+      min-height: 260px;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      overflow: hidden;
+    }
+    .card-title {
+      padding: 8px 10px;
+      font-weight: 700;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+    }
+    .card-body {
+      display: grid;
+      place-items: center;
+      min-height: 220px;
+      color: var(--muted);
+      text-align: center;
+      padding: 8px;
+    }
+    .card-body img {
+      max-width: 100%;
+      max-height: 430px;
+      object-fit: contain;
+    }
+    .card-body video {
+      width: 100%;
+      max-height: 520px;
+      background: #0b2025;
+      border-radius: 4px;
+    }
+    .video-card { grid-column: 1 / -1; }
+    .status { color: var(--muted); font-size: 13px; }
+    @media (max-width: 1100px) {
+      .plots-layout { grid-template-columns: 1fr; }
+      .left, .compact-panel, .right { height: auto; max-height: none; }
+      .meta-grid, .preview-grid { grid-template-columns: 1fr; }
+      .filters { grid-template-columns: 1fr; }
+      header { grid-template-columns: 1fr; }
+      .header-tools { justify-content: start; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>DataFiles Browser</h1>
+      <div id="root" class="root"></div>
+      <div id="analysisStatus" class="root"></div>
+    </div>
+    <div class="header-tools">
+      <div class="tabs" role="tablist" aria-label="DataFiles Browser views">
+        <button id="runListTabButton" class="tab-button active" type="button" role="tab" aria-selected="true" aria-controls="runListTab">Run List</button>
+        <button id="plotsTabButton" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="plotsTab">Plots</button>
+      </div>
+      <div class="actions">
+        <button id="refresh">Refresh</button>
+        <button id="rerunSelected">Rerun Selected</button>
+        <button id="rebuild" class="secondary">Rebuild Index</button>
+        <button id="allMetadata" class="secondary">All Metadata</button>
+      </div>
+    </div>
+  </header>
+  <main>
+    <section id="runListTab" class="tab-panel run-list-layout" role="tabpanel" aria-labelledby="runListTabButton">
+      <section class="panel left">
+        <div class="filters">
+          <input id="search" type="search" placeholder="Search runs, sample, tags, attenuation, OPO, wavelength...">
+          <input id="minRange" type="number" step="0.01" placeholder="Range >=">
+          <div id="count" class="count">0 runs</div>
+          <div id="selectionStatus" class="count">0 selected</div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th data-sort="star">Star</th>
+                <th>Select</th>
+                <th data-sort="date_sort">Date</th>
+                <th data-sort="sample">Sample</th>
+                <th data-sort="exp_tag">Exp Tag</th>
+                <th data-sort="port_power">Port Power</th>
+                <th data-sort="sample_power">Sample Power</th>
+                <th data-sort="attenuation_factor_sort">Atten. Factor</th>
+                <th data-sort="use_opo_sort">Use OPO</th>
+                <th data-sort="wavelength_nm_sort">Wavelength nm</th>
+                <th data-sort="temperature">Temp</th>
+                <th data-sort="shot_noise_value">Shot Noise</th>
+                <th data-sort="scan_range">Range</th>
+                <th data-sort="folder_name">Run Folder</th>
+              </tr>
+            </thead>
+            <tbody id="runRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+    <section id="plotsTab" class="tab-panel plots-layout hidden" role="tabpanel" aria-labelledby="plotsTabButton">
+      <section class="panel compact-panel">
+        <div class="compact-filters">
+          <input id="plotSearch" type="search" placeholder="Find run for plots...">
+          <div id="plotCount" class="count">0 runs</div>
+        </div>
+        <div id="plotRunList" class="compact-run-list"></div>
+      </section>
+      <section class="panel right">
+        <div class="selected-header">
+          <div>
+            <div id="selectedTitle" class="selected-title">Nothing selected</div>
+            <div id="selectedPath" class="status"></div>
+          </div>
+          <div class="actions">
+            <button id="editMetadata">Edit Metadata</button>
+            <button id="rerunThisRun" class="secondary">Rerun This Run</button>
+            <button id="openFolder" class="secondary">Open Folder</button>
+            <button id="playMp4" class="secondary">Play MP4</button>
+            <button id="toggleStar" class="secondary">Star</button>
+          </div>
+        </div>
+        <div id="metrics" class="meta-grid"></div>
+        <div class="preview-grid">
+          <div class="card video-card" data-kind="movie_path" data-media="video"><div class="card-title">MP4 Player <button class="secondary">Open</button></div><div class="card-body"></div></div>
+          <div class="card" data-kind="final_result_path"><div class="card-title">Final Result <button class="secondary">Open</button></div><div class="card-body"></div></div>
+          <div class="card" data-kind="loglog_plot_path"><div class="card-title">Log-Log Eval <button class="secondary">Open</button></div><div class="card-body"></div></div>
+          <div class="card" data-kind="diagonal_offset_path"><div class="card-title">Diagonal Offset <button class="secondary">Open</button></div><div class="card-body"></div></div>
+          <div class="card" data-kind="raw_std_plot_path"><div class="card-title">Raw Std Over Time <button class="secondary">Open</button></div><div class="card-body"></div></div>
+        </div>
+      </section>
+    </section>
+  </main>
+  <script>
+    let runs = [];
+    let filtered = [];
+    let selected = null;
+    let checkedRuns = new Set();
+    let analysisPoll = null;
+    let lastFocusRefresh = 0;
+    let sortKey = "date_sort";
+    let sortDesc = true;
+
+    const runRows = document.getElementById("runRows");
+    const search = document.getElementById("search");
+    const minRange = document.getElementById("minRange");
+    const plotSearch = document.getElementById("plotSearch");
+    const plotRunList = document.getElementById("plotRunList");
+    const runListTab = document.getElementById("runListTab");
+    const plotsTab = document.getElementById("plotsTab");
+    const runListTabButton = document.getElementById("runListTabButton");
+    const plotsTabButton = document.getElementById("plotsTabButton");
+    const rerunSelectedButton = document.getElementById("rerunSelected");
+
+    function text(value) { return value === undefined || value === null || value === "" ? "-" : String(value); }
+    function assetUrl(path) { return path ? "/asset?path=" + encodeURIComponent(path) : ""; }
+    function numeric(value) {
+      if (value === undefined || value === null || value === "-" || value === "") return null;
+      const number = Number(value);
+      return Number.isFinite(number) ? number : null;
+    }
+    function searchBlob(run) {
+      return [
+        run.folder_name, run.folder_path, run.sample, run.exp_tag, run.description,
+        (run.tags || []).join(" "), run.filename, run.duration, run.port_power,
+        run.sample_power, run.attenuation_factor, run.use_opo, run.wavelength_nm,
+        run.temperature, run.shot_noise
+      ].join(" ").toLowerCase();
+    }
+    function applyFilters() {
+      const needle = search.value.trim().toLowerCase();
+      const min = minRange.value === "" ? null : Number(minRange.value);
+      filtered = runs.filter(run => {
+        if (needle && !searchBlob(run).includes(needle)) return false;
+        const range = numeric(run.scan_range);
+        if (Number.isFinite(min) && (range === null || range < min)) return false;
+        return true;
+      });
+      filtered.sort(compareRuns);
+      renderRows();
+      renderPlotRunList();
+      renderSelectionStatus();
+      if (!selected && filtered.length) selectRun(filtered[0].folder_path);
+    }
+    function setTab(tabName) {
+      const showPlots = tabName === "plots";
+      runListTab.classList.toggle("hidden", showPlots);
+      plotsTab.classList.toggle("hidden", !showPlots);
+      runListTabButton.classList.toggle("active", !showPlots);
+      plotsTabButton.classList.toggle("active", showPlots);
+      runListTabButton.setAttribute("aria-selected", String(!showPlots));
+      plotsTabButton.setAttribute("aria-selected", String(showPlots));
+    }
+    function compareRuns(a, b) {
+      let av = a[sortKey];
+      let bv = b[sortKey];
+      const an = numeric(av);
+      const bn = numeric(bv);
+      if (an !== null || bn !== null) {
+        av = an === null ? Number.POSITIVE_INFINITY : an;
+        bv = bn === null ? Number.POSITIVE_INFINITY : bn;
+      } else {
+        av = String(av || "").toLowerCase();
+        bv = String(bv || "").toLowerCase();
+      }
+      if (av < bv) return sortDesc ? 1 : -1;
+      if (av > bv) return sortDesc ? -1 : 1;
+      return 0;
+    }
+    function renderRows() {
+      document.getElementById("count").textContent = `${filtered.length} runs`;
+      runRows.innerHTML = "";
+      filtered.forEach(run => {
+        const tr = document.createElement("tr");
+        tr.className = selected && selected.folder_path === run.folder_path ? "active" : "";
+        tr.innerHTML = `
+          <td>${run.star ? "[x]" : "[ ]"}</td>
+          <td><input class="run-check" type="checkbox" ${checkedRuns.has(run.folder_path) ? "checked" : ""} aria-label="Select ${text(run.folder_name)} for rerun"></td>
+          <td>${text(run.date)}</td>
+          <td>${text(run.sample)}</td>
+          <td>${text(run.exp_tag)}</td>
+          <td>${text(run.port_power)}</td>
+          <td>${text(run.sample_power)}</td>
+          <td>${text(run.attenuation_factor)}</td>
+          <td>${text(run.use_opo)}</td>
+          <td>${text(run.wavelength_nm)}</td>
+          <td>${text(run.temperature)}</td>
+          <td>${text(run.shot_noise_value)}</td>
+          <td>${text(run.scan_range)}</td>
+          <td>${text(run.folder_name)}</td>`;
+        const checkbox = tr.querySelector(".run-check");
+        checkbox.addEventListener("click", event => event.stopPropagation());
+        checkbox.addEventListener("change", () => toggleRunChecked(run.folder_path, checkbox.checked));
+        tr.addEventListener("click", () => selectRun(run.folder_path));
+        runRows.appendChild(tr);
+      });
+    }
+    function toggleRunChecked(folderPath, checked) {
+      if (checked) checkedRuns.add(folderPath);
+      else checkedRuns.delete(folderPath);
+      renderRows();
+      renderPlotRunList();
+      renderSelectionStatus();
+    }
+    function renderSelectionStatus() {
+      const count = checkedRuns.size;
+      document.getElementById("selectionStatus").textContent = count ? `${count} selected for rerun` : "0 selected";
+      rerunSelectedButton.textContent = count ? `Rerun ${count} Selected` : "Rerun Selected";
+    }
+    function renderPlotRunList() {
+      const needle = plotSearch.value.trim().toLowerCase();
+      const plotRuns = needle ? filtered.filter(run => searchBlob(run).includes(needle)) : filtered;
+      document.getElementById("plotCount").textContent = `${plotRuns.length} runs`;
+      plotRunList.innerHTML = "";
+      plotRuns.forEach(run => {
+        const item = document.createElement("div");
+        item.className = selected && selected.folder_path === run.folder_path ? "compact-run-item active" : "compact-run-item";
+        item.innerHTML = `
+          <input class="plot-run-check" type="checkbox" ${checkedRuns.has(run.folder_path) ? "checked" : ""} aria-label="Select ${text(run.folder_name)} for rerun">
+          <div>
+            <div class="compact-main">
+              <span>${text(run.date)}</span>
+              <span>${text(run.attenuation_factor)}x</span>
+            </div>
+            <div class="compact-sub">${text(run.sample)} - ${text(run.exp_tag)}</div>
+            <div class="compact-sub">OPO ${text(run.use_opo)} | ${text(run.wavelength_nm)} nm</div>
+            <div class="compact-sub">${text(run.folder_name)}</div>
+          </div>
+        `;
+        const checkbox = item.querySelector(".plot-run-check");
+        checkbox.addEventListener("click", event => event.stopPropagation());
+        checkbox.addEventListener("change", () => toggleRunChecked(run.folder_path, checkbox.checked));
+        item.addEventListener("click", () => selectRun(run.folder_path));
+        plotRunList.appendChild(item);
+      });
+    }
+    function selectRun(folderPath) {
+      selected = runs.find(run => run.folder_path === folderPath) || null;
+      renderRows();
+      renderPlotRunList();
+      renderSelected();
+    }
+    function renderMetric(label, value) {
+      return `<div class="metric"><span>${label}</span>${text(value)}</div>`;
+    }
+    function renderSelected() {
+      if (!selected) {
+        document.getElementById("selectedTitle").textContent = "Nothing selected";
+        document.getElementById("selectedPath").textContent = "";
+        document.getElementById("metrics").innerHTML = "";
+        document.querySelectorAll(".card .card-body").forEach(body => { body.textContent = "Select a run"; });
+        return;
+      }
+      document.getElementById("selectedTitle").textContent = `${text(selected.sample)}   ${text(selected.date)}`;
+      document.getElementById("selectedPath").textContent = selected.folder_path;
+      document.getElementById("toggleStar").textContent = selected.star ? "Unstar" : "Star";
+      document.getElementById("metrics").innerHTML = [
+        renderMetric("Run", selected.folder_name),
+        renderMetric("Tags", (selected.tags || []).join(", ")),
+        renderMetric("Use OPO", selected.use_opo),
+        renderMetric("Wavelength nm", selected.wavelength_nm),
+        renderMetric("Atten. Factor", selected.attenuation_factor),
+        renderMetric("Shot Noise", selected.shot_noise),
+        renderMetric("Port Power", selected.port_power),
+        renderMetric("Sample Power", selected.sample_power),
+        renderMetric("Temperature K", selected.temperature),
+        renderMetric("Range mm", selected.scan_range)
+      ].join("");
+      document.querySelectorAll(".card").forEach(card => {
+        const key = card.dataset.kind;
+        const isVideo = card.dataset.media === "video";
+        const body = card.querySelector(".card-body");
+        const button = card.querySelector("button");
+        const path = selected[key];
+        if (path) {
+          body.innerHTML = isVideo
+            ? `<video controls preload="metadata" src="${assetUrl(path)}"></video>`
+            : `<img src="${assetUrl(path)}" alt="">`;
+          button.disabled = false;
+          button.onclick = () => openPath(path);
+        } else {
+          body.textContent = isVideo ? "No MP4 found" : "Not found";
+          button.disabled = true;
+          button.onclick = null;
+        }
+      });
+    }
+    function setAnalysisStatus(message) {
+      document.getElementById("analysisStatus").textContent = message || "";
+    }
+    function rerunTargets(useCurrentOnly = false) {
+      if (useCurrentOnly && selected) return [selected.folder_path];
+      if (checkedRuns.size) return Array.from(checkedRuns);
+      return selected ? [selected.folder_path] : [];
+    }
+    async function rerunSelected(useCurrentOnly = false) {
+      const folderPaths = rerunTargets(useCurrentOnly);
+      if (!folderPaths.length) {
+        alert("Select at least one run first.");
+        return;
+      }
+      const label = folderPaths.length === 1 ? "1 run" : `${folderPaths.length} runs`;
+      const preview = folderPaths.slice(0, 8).map(path => path.split(/[\\/]/).pop()).join("\n");
+      const extra = folderPaths.length > 8 ? `\n... and ${folderPaths.length - 8} more` : "";
+      if (!confirm(`Rerun cm_pipeline_all_in_one.py for ${label}?\n\n${preview}${extra}`)) return;
+      const data = await postJson("/api/rerun", { folder_paths: folderPaths });
+      setAnalysisStatus(data.message || "Running analysis...");
+      startAnalysisPoll();
+    }
+    function startAnalysisPoll() {
+      if (analysisPoll) clearInterval(analysisPoll);
+      const poll = async () => {
+        try {
+          const response = await fetch("/api/rerun-status");
+          if (!response.ok) throw new Error(await response.text());
+          const data = await response.json();
+          setAnalysisStatus(data.message || (data.running ? "Running analysis..." : ""));
+          if (!data.running) {
+            clearInterval(analysisPoll);
+            analysisPoll = null;
+            const folderPath = selected && selected.folder_path;
+            await loadRuns(false);
+            if (folderPath) selectRun(folderPath);
+          }
+        } catch (err) {
+          setAnalysisStatus(err.message);
+        }
+      };
+      poll();
+      analysisPoll = setInterval(poll, 2500);
+    }
+    async function loadRuns(rebuild = false) {
+      const url = rebuild ? "/api/runs?rebuild=1" : "/api/runs";
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(await response.text());
+      const data = await response.json();
+      document.getElementById("root").textContent = data.root;
+      runs = data.runs;
+      const validFolders = new Set(runs.map(run => run.folder_path));
+      checkedRuns = new Set(Array.from(checkedRuns).filter(folderPath => validFolders.has(folderPath)));
+      selected = null;
+      applyFilters();
+    }
+    async function reloadPreservingSelection(rebuild = false) {
+      const folderPath = selected && selected.folder_path;
+      await loadRuns(rebuild);
+      if (folderPath && runs.some(run => run.folder_path === folderPath)) selectRun(folderPath);
+    }
+    async function refreshAfterExternalEdit() {
+      const now = Date.now();
+      if (now - lastFocusRefresh < 1500) return;
+      lastFocusRefresh = now;
+      await reloadPreservingSelection(false);
+    }
+    async function postJson(url, payload) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) throw new Error(await response.text());
+      return response.json();
+    }
+    async function openPath(path) { await postJson("/api/open", { path }); }
+    document.querySelectorAll("th[data-sort]").forEach(th => {
+      th.addEventListener("click", () => {
+        const next = th.dataset.sort;
+        if (sortKey === next) sortDesc = !sortDesc;
+        else { sortKey = next; sortDesc = next === "date_sort"; }
+        applyFilters();
+      });
+    });
+    search.addEventListener("input", applyFilters);
+    minRange.addEventListener("input", applyFilters);
+    plotSearch.addEventListener("input", renderPlotRunList);
+    runListTabButton.addEventListener("click", () => setTab("runs"));
+    plotsTabButton.addEventListener("click", () => setTab("plots"));
+    document.getElementById("refresh").addEventListener("click", () => reloadPreservingSelection(false));
+    rerunSelectedButton.addEventListener("click", () => rerunSelected(false).catch(err => alert(err.message)));
+    document.getElementById("rerunThisRun").addEventListener("click", () => rerunSelected(true).catch(err => alert(err.message)));
+    document.getElementById("rebuild").addEventListener("click", () => reloadPreservingSelection(true));
+    document.getElementById("allMetadata").addEventListener("click", () => postJson("/api/edit-all-metadata", {}));
+    document.getElementById("openFolder").addEventListener("click", () => selected && openPath(selected.folder_path));
+    document.getElementById("playMp4").addEventListener("click", () => selected && selected.movie_path && openPath(selected.movie_path));
+    document.getElementById("editMetadata").addEventListener("click", () => selected && postJson("/api/edit-metadata", { path: selected.metadata_path || selected.folder_path }));
+    document.getElementById("toggleStar").addEventListener("click", async () => {
+      if (!selected) return;
+      const folderPath = selected.folder_path;
+      await postJson("/api/star", { folder_path: selected.folder_path, star: !selected.star });
+      await loadRuns(false);
+      selectRun(folderPath);
+    });
+    window.addEventListener("focus", () => refreshAfterExternalEdit().catch(err => setAnalysisStatus(err.message)));
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) refreshAfterExternalEdit().catch(err => setAnalysisStatus(err.message));
+    });
+    loadRuns(false).catch(err => alert(err.message));
+  </script>
+</body>
+</html>

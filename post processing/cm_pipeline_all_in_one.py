@@ -28,10 +28,10 @@ BIN_MM = 0.1
 # Area scaling from detector pixel units:
 # - 0.24 is the detector pitch in mm per pixel.
 # - 32768 is the full-scale detector count used to normalize the raw signal.
-# Attenuator correction is applied separately from metadata/assumption below.
+# Attenuator correction is supplied by WPF metadata and read directly by this pipeline.
 DETECTOR_AREA_SCALE = (0.24**2) / (32768**2)
 # Bump this when a code or assumption change should force existing runs to rebuild once.
-PIPELINE_CACHE_VERSION = "2026-04-30-aggressive-low-std-gating-v1"
+PIPELINE_CACHE_VERSION = "2026-05-07-wpf-attenuator-metadata-v1"
 # Conversion factor from distance in millimeters to time in picoseconds for this setup.
 MM_TO_PS = 6.6
 # Time per processed frame, in seconds:
@@ -46,7 +46,7 @@ MAX_LINE_PLOT_POINTS = 50_000
 
 ENABLE_DROPPED_WINDOW_GATING = False
 ENABLE_SATURATION_CLEANUP = False
-ENABLE_VARIANCE_GATING = True
+ENABLE_VARIANCE_GATING = False
 STD_STATE_TO_KEEP = "low"
 STD_GATE_MODE = "aggressive_low_core"
 STD_LOW_STATE_MAD_SIGMA = 2.0
@@ -54,10 +54,13 @@ STD_LOW_STATE_QUANTILE_CAP = 0.90
 ENABLE_CHANNEL_HEALTH_GATING = False
 ENABLE_EVEN_FRAMES_ONLY = False
 ENABLE_FFT_ANALYSIS = False
-ASSUME_POWER_DETECTOR_ATTENUATOR_APPLIED = False
 
 REQUIRED_PIPELINE_OUTPUTS = [
     "metadata.json",
+    "raw_std_analysis.csv",
+    "raw_std_over_time.png",
+    "raw_std_fft_spectrum.csv",
+    "raw_std_fft_spectrum.png",
     "final_amplitudes_all_pairs.csv",
     "final_result_ALL_PAIRS.png",
     "final_clean_result.png",
@@ -261,6 +264,53 @@ def extract_bool(text: str, pattern: str) -> bool | None:
     return match.group(1).strip().lower() in {"true", "1", "yes", "on"}
 
 
+def metadata_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
+def metadata_float(value: object) -> float:
+    if value in (None, ""):
+        return math.nan
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return math.nan
+
+
+def apply_metadata_attenuator(run_folder: Path, meta: Meta) -> None:
+    json_path = run_folder / "metadata.json"
+    if not json_path.is_file():
+        meta.power_detector_attenuator_applied = False
+        meta.power_detector_attenuator_total_db = 0.0
+        meta.power_detector_attenuator_correction_factor = 1.0
+        return
+
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {}
+    physics = payload.get("PhysicsData") if isinstance(payload, dict) else {}
+    physics = physics if isinstance(physics, dict) else {}
+
+    applied = metadata_bool(physics.get("PowerDetectorAttenuatorApplied"), False)
+    total_db = metadata_float(physics.get("PowerDetectorAttenuatorTotal_dB"))
+    correction_factor = metadata_float(physics.get("PowerDetectorAttenuatorCorrectionFactor"))
+
+    meta.power_detector_attenuator_applied = applied
+    meta.power_detector_attenuator_total_db = 0.0 if not applied or not np.isfinite(total_db) else total_db
+    meta.power_detector_attenuator_correction_factor = (
+        correction_factor
+        if applied and np.isfinite(correction_factor) and correction_factor > 0
+        else 1.0
+    )
+
+
 def read_sensitivity_log(run_folder: Path) -> Meta:
     meta = Meta()
     path = run_folder / "sensitivity.log"
@@ -268,17 +318,6 @@ def read_sensitivity_log(run_folder: Path) -> Meta:
         return meta
 
     text = path.read_text(encoding="utf-8", errors="ignore")
-    attenuator_applied = extract_bool(text, r"Power Detector Attenuator Applied\s*=\s*(true|false|1|0|yes|no|on|off)")
-    if ASSUME_POWER_DETECTOR_ATTENUATOR_APPLIED is not None:
-        meta.power_detector_attenuator_applied = ASSUME_POWER_DETECTOR_ATTENUATOR_APPLIED
-    elif attenuator_applied is not None:
-        meta.power_detector_attenuator_applied = attenuator_applied
-    meta.power_detector_attenuator_total_db = extract_val(text, r"(?:Total|Power Detector Attenuator Total)\s*=\s*([\d\.E\+\-]+)\s*dB")
-    meta.power_detector_attenuator_correction_factor = extract_val(text, r"Correction Factor\s*=\s*([\d\.E\+\-]+)")
-    if not np.isfinite(meta.power_detector_attenuator_total_db):
-        meta.power_detector_attenuator_total_db = 20.0 if meta.power_detector_attenuator_applied else 0.0
-    if not np.isfinite(meta.power_detector_attenuator_correction_factor):
-        meta.power_detector_attenuator_correction_factor = 10 ** (meta.power_detector_attenuator_total_db / 10.0) if meta.power_detector_attenuator_applied else 1.0
     meta.p1_mw = extract_val(text, r"P1\s*=\s*([\d\.E\+\-]+)\s*mW")
     meta.p2_mw = extract_val(text, r"P2\s*=\s*([\d\.E\+\-]+)\s*mW")
     meta.sensitivity = extract_val(text, r"Sensitivity\s*=\s*([\d\.E\+\-]+)")
@@ -537,7 +576,6 @@ def pipeline_cache_signature() -> dict[str, object]:
     return {
         "version": PIPELINE_CACHE_VERSION,
         "detector_area_scale": DETECTOR_AREA_SCALE,
-        "attenuator_assumption": ASSUME_POWER_DETECTOR_ATTENUATOR_APPLIED,
         "enable_dropped_window_gating": ENABLE_DROPPED_WINDOW_GATING,
         "enable_saturation_cleanup": ENABLE_SATURATION_CLEANUP,
         "enable_variance_gating": ENABLE_VARIANCE_GATING,
@@ -787,6 +825,48 @@ def save_raw_std_analysis(run_folder: Path, raw_cm: np.ndarray, t_seconds: np.nd
     fig.tight_layout()
     save_figure_with_provenance(fig, run_folder / "raw_std_over_time.png", run_folder)
     plt.close(fig)
+
+    if raw_std.size < 2:
+        return
+
+    centered_raw_std = raw_std - raw_std.mean()
+    length = centered_raw_std.size
+    fft_vals = np.fft.rfft(centered_raw_std)
+    amplitude = np.abs(fft_vals / length)
+    if amplitude.size > 2:
+        amplitude[1:-1] *= 2
+    freqs_hz = np.fft.rfftfreq(length, d=RAW_STD_FRAME_INTEGRATION_S)
+
+    with (run_folder / "raw_std_fft_spectrum.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "frequency_hz",
+                "amplitude",
+                "period_s",
+            ]
+        )
+        for freq_hz, amp in zip(freqs_hz, amplitude, strict=False):
+            period_s = math.inf if freq_hz == 0 else 1.0 / freq_hz
+            writer.writerow([f"{freq_hz:.12g}", f"{amp:.12g}", f"{period_s:.12g}"])
+
+    plot_mask = freqs_hz > 0
+    fig_fft, ax_fft = plt.subplots(figsize=(12, 6.5))
+    if np.any(plot_mask):
+        ax_fft.plot(freqs_hz[plot_mask], amplitude[plot_mask], color="#c44e52", linewidth=1.0)
+        ax_fft.set_yscale("log")
+    ax_fft.set_title("Raw Std FFT Spectrum")
+    ax_fft.set_xlabel("Frequency (Hz)")
+    ax_fft.set_ylabel("Amplitude")
+    ax_fft.grid(True, alpha=0.25)
+    fig_fft.tight_layout()
+    save_figure_with_provenance(
+        fig_fft,
+        run_folder / "raw_std_fft_spectrum.png",
+        run_folder,
+        extra=f"Raw std FFT after mean removal | dt={RAW_STD_FRAME_INTEGRATION_S:.12g} s",
+    )
+    plt.close(fig_fft)
 
 
 def frame_review_dir_name(start_idx: int, review_count: int) -> str:
@@ -1458,11 +1538,6 @@ def update_metadata_json(run_folder: Path, meta: Meta) -> None:
     physics = payload.setdefault("PhysicsData", {})
     physics["Power_mW_1"] = None if not np.isfinite(meta.p1_mw) else meta.p1_mw
     physics["Power_mW_2"] = None if not np.isfinite(meta.p2_mw) else meta.p2_mw
-    physics["PowerDetectorAttenuatorApplied"] = bool(meta.power_detector_attenuator_applied)
-    physics["PowerDetectorAttenuatorCount"] = 2 if meta.power_detector_attenuator_applied else 0
-    physics["PowerDetectorAttenuatorEach_dB"] = 10.0 if meta.power_detector_attenuator_applied else 0.0
-    physics["PowerDetectorAttenuatorTotal_dB"] = meta.power_detector_attenuator_total_db
-    physics["PowerDetectorAttenuatorCorrectionFactor"] = meta.power_detector_attenuator_correction_factor
     physics["Sensitivity_V_photon"] = None if not np.isfinite(meta.sensitivity) else meta.sensitivity
     physics["ShotNoise1_V"] = None if not np.isfinite(meta.shot_noise1_v) else meta.shot_noise1_v
     physics["ShotNoise2_V"] = None if not np.isfinite(meta.shot_noise2_v) else meta.shot_noise2_v
@@ -1533,6 +1608,7 @@ def run_pipeline(
     t_datetimes = [base_dt + timedelta(seconds=float(s)) for s in t_absolute_seconds]
 
     meta = read_sensitivity_log(run_folder)
+    apply_metadata_attenuator(run_folder, meta)
     cm_scale_factor = DETECTOR_AREA_SCALE * meta.power_detector_attenuator_correction_factor
     cm = raw_cm * cm_scale_factor
     conversion_factor = meta.conversion_factor
