@@ -31,6 +31,29 @@
     }
     h1 { margin: 0; font-size: 22px; }
     .root { color: #d6e8eb; font-size: 13px; margin-top: 4px; overflow-wrap: anywhere; }
+    .progress-wrap {
+      display: none;
+      margin-top: 8px;
+      max-width: 680px;
+    }
+    .progress-track {
+      height: 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.22);
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.3);
+    }
+    .progress-fill {
+      width: 0%;
+      height: 100%;
+      background: #74d6df;
+      transition: width 180ms ease;
+    }
+    .progress-label {
+      color: #d6e8eb;
+      font-size: 12px;
+      margin-top: 4px;
+    }
     button {
       border: 1px solid #0f5962;
       background: var(--accent);
@@ -196,6 +219,13 @@
       margin-bottom: 12px;
     }
     .selected-title { font-size: 20px; font-weight: 700; }
+    .selected-description {
+      margin-top: 6px;
+      font-size: 14px;
+      line-height: 1.35;
+      color: var(--ink);
+      overflow-wrap: anywhere;
+    }
     .actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: end; }
     .meta-grid {
       display: grid;
@@ -270,6 +300,12 @@
       <h1>DataFiles Browser</h1>
       <div id="root" class="root"></div>
       <div id="analysisStatus" class="root"></div>
+      <div id="analysisProgress" class="progress-wrap" aria-live="polite">
+        <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="analysisProgressFill" class="progress-fill"></div>
+        </div>
+        <div id="analysisProgressLabel" class="progress-label">0%</div>
+      </div>
     </div>
     <div class="header-tools">
       <div class="tabs" role="tablist" aria-label="DataFiles Browser views">
@@ -277,6 +313,7 @@
         <button id="plotsTabButton" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="plotsTab">Plots</button>
       </div>
       <div class="actions">
+        <button id="chooseFolder" class="secondary">Choose DataFiles Folder</button>
         <button id="refresh">Refresh</button>
         <button id="rerunSelected">Rerun Selected</button>
         <button id="rebuild" class="secondary">Rebuild Index</button>
@@ -288,7 +325,7 @@
     <section id="runListTab" class="tab-panel run-list-layout" role="tabpanel" aria-labelledby="runListTabButton">
       <section class="panel left">
         <div class="filters">
-          <input id="search" type="search" placeholder="Search runs, sample, tags, attenuation, OPO, wavelength...">
+          <input id="search" type="search" placeholder="Search runs, sample, tags, attenuation, polarizer, OPO, wavelength, scan rate...">
           <input id="minRange" type="number" step="0.01" placeholder="Range >=">
           <div id="count" class="count">0 runs</div>
           <div id="selectionStatus" class="count">0 selected</div>
@@ -301,7 +338,8 @@
                 <th>Select</th>
                 <th data-sort="date_sort">Date</th>
                 <th data-sort="sample">Sample</th>
-                <th data-sort="exp_tag">Exp Tag</th>
+                <th data-sort="tags">Tags</th>
+                <th data-sort="description">Description</th>
                 <th data-sort="port_power">Port Power</th>
                 <th data-sort="sample_power">Sample Power</th>
                 <th data-sort="attenuation_factor_sort">Atten. Factor</th>
@@ -310,6 +348,7 @@
                 <th data-sort="temperature">Temp</th>
                 <th data-sort="shot_noise_value">Shot Noise</th>
                 <th data-sort="scan_range">Range</th>
+                <th data-sort="scan_rate_sort">Scan Rate</th>
                 <th data-sort="folder_name">Run Folder</th>
               </tr>
             </thead>
@@ -330,6 +369,7 @@
         <div class="selected-header">
           <div>
             <div id="selectedTitle" class="selected-title">Nothing selected</div>
+            <div id="selectedDescription" class="selected-description"></div>
             <div id="selectedPath" class="status"></div>
           </div>
           <div class="actions">
@@ -360,6 +400,24 @@
     let lastFocusRefresh = 0;
     let sortKey = "date_sort";
     let sortDesc = true;
+    let standaloneRootHandle = null;
+    let lastCheckedFolderPath = null;
+    let objectUrls = new Map();
+    const standaloneMode = location.protocol === "file:";
+    const finalResultName = "final_clean_result.png";
+    const movieName = "signal_emergence.mp4";
+    const loglogPlotName = "loglog_eval.png";
+    const diagonalOffsetPlotNames = ["diagonal_offset_matrix_urad2.png", "diagonal_offset_matrix_V2.png"];
+    const rawStdPlotNames = ["raw_std_over_time.png", "raw_std_within_parity.png"];
+    const darkNoiseTagPortPowerEstimateMw = 0.01;
+    const darkNoiseTagPowerEstimateMw = darkNoiseTagPortPowerEstimateMw * 2;
+    const darkNoiseSyntheticWavelengthNm = 1550;
+    const darkNoiseSyntheticResponsivityAPerW = 1.02;
+    const darkNoiseSyntheticReferenceResponsivityAPerW = 1.02;
+    const darkNoiseSyntheticDetectorVoltagePerMw = 10;
+    const darkNoiseSyntheticRepRateHz = 7.6e7;
+    const darkNoiseSyntheticResponseTimeS = 3.5e-9;
+    const darkNoiseTagName = "Dark Noise";
 
     const runRows = document.getElementById("runRows");
     const search = document.getElementById("search");
@@ -371,20 +429,50 @@
     const runListTabButton = document.getElementById("runListTabButton");
     const plotsTabButton = document.getElementById("plotsTabButton");
     const rerunSelectedButton = document.getElementById("rerunSelected");
+    const chooseFolderButton = document.getElementById("chooseFolder");
 
     function text(value) { return value === undefined || value === null || value === "" ? "-" : String(value); }
-    function assetUrl(path) { return path ? "/asset?path=" + encodeURIComponent(path) : ""; }
+    function assetUrl(path) {
+      if (!path) return "";
+      if (standaloneMode) return objectUrls.get(path) || "";
+      return "/asset?path=" + encodeURIComponent(path);
+    }
     function numeric(value) {
       if (value === undefined || value === null || value === "-" || value === "") return null;
       const number = Number(value);
       return Number.isFinite(number) ? number : null;
     }
+    function estimateDarkNoiseSyntheticConversionFactorV2Rad2(
+      portPowerMw = darkNoiseTagPortPowerEstimateMw,
+      wavelengthNm = darkNoiseSyntheticWavelengthNm,
+      responsivityAPerW = darkNoiseSyntheticResponsivityAPerW,
+      referenceResponsivityAPerW = darkNoiseSyntheticReferenceResponsivityAPerW,
+      detectorVoltagePerMw = darkNoiseSyntheticDetectorVoltagePerMw,
+      repRateHz = darkNoiseSyntheticRepRateHz,
+      responseTimeS = darkNoiseSyntheticResponseTimeS
+    ) {
+      const planckConstant = 6.62607015e-34;
+      const speedOfLight = 299792458;
+      const photonEnergyJ = planckConstant * speedOfLight / (wavelengthNm * 1e-9);
+      const portPowerW = portPowerMw * 1e-3;
+      const photonsPerPulse = portPowerW / (photonEnergyJ * repRateHz);
+      const sensitivity = responsivityAPerW * photonEnergyJ / responseTimeS * detectorVoltagePerMw * 1e3 / referenceResponsivityAPerW;
+      const conversionPerPort = 2 * photonsPerPulse * sensitivity;
+      return conversionPerPort * conversionPerPort;
+    }
+    const darkNoiseSyntheticConversionFactor = estimateDarkNoiseSyntheticConversionFactorV2Rad2();
+    function darkNoiseSyntheticNote(factor = darkNoiseSyntheticConversionFactor) {
+      return `${darkNoiseTagName} tag: synthetic conversion factor ${factor.toPrecision(6)} V^2/rad^2 applied from ${darkNoiseSyntheticWavelengthNm} nm, ${darkNoiseTagPortPowerEstimateMw} mW per detector port; results shown in artificial urad^2`;
+    }
+    function starIcon(starred) {
+      return starred ? "\u2605" : "\u2606";
+    }
     function searchBlob(run) {
       return [
         run.folder_name, run.folder_path, run.sample, run.exp_tag, run.description,
         (run.tags || []).join(" "), run.filename, run.duration, run.port_power,
-        run.sample_power, run.attenuation_factor, run.use_opo, run.wavelength_nm,
-        run.temperature, run.shot_noise
+        run.sample_power, run.attenuation_factor, run.polarizer, run.use_opo, run.wavelength_nm,
+        run.scan_rate, run.temperature, run.shot_noise, run.star ? "star starred" : ""
       ].join(" ").toLowerCase();
     }
     function applyFilters() {
@@ -430,15 +518,16 @@
     function renderRows() {
       document.getElementById("count").textContent = `${filtered.length} runs`;
       runRows.innerHTML = "";
-      filtered.forEach(run => {
+      filtered.forEach((run, index) => {
         const tr = document.createElement("tr");
         tr.className = selected && selected.folder_path === run.folder_path ? "active" : "";
         tr.innerHTML = `
-          <td>${run.star ? "[x]" : "[ ]"}</td>
+          <td title="${run.star ? "Starred" : "Not starred"}" aria-label="${run.star ? "Starred" : "Not starred"}">${starIcon(run.star)}</td>
           <td><input class="run-check" type="checkbox" ${checkedRuns.has(run.folder_path) ? "checked" : ""} aria-label="Select ${text(run.folder_name)} for rerun"></td>
           <td>${text(run.date)}</td>
           <td>${text(run.sample)}</td>
-          <td>${text(run.exp_tag)}</td>
+          <td>${text((run.tags || []).join(", "))}</td>
+          <td>${text(run.description)}</td>
           <td>${text(run.port_power)}</td>
           <td>${text(run.sample_power)}</td>
           <td>${text(run.attenuation_factor)}</td>
@@ -447,11 +536,20 @@
           <td>${text(run.temperature)}</td>
           <td>${text(run.shot_noise_value)}</td>
           <td>${text(run.scan_range)}</td>
+          <td>${text(run.scan_rate)}</td>
           <td>${text(run.folder_name)}</td>`;
         const checkbox = tr.querySelector(".run-check");
-        checkbox.addEventListener("click", event => event.stopPropagation());
-        checkbox.addEventListener("change", () => toggleRunChecked(run.folder_path, checkbox.checked));
-        tr.addEventListener("click", () => selectRun(run.folder_path));
+        checkbox.addEventListener("click", event => {
+          event.stopPropagation();
+          handleCheckedGesture(filtered, index, event, !checkedRuns.has(run.folder_path));
+        });
+        tr.addEventListener("click", event => {
+          if (event.shiftKey || event.ctrlKey || event.metaKey) {
+            handleCheckedGesture(filtered, index, event, !checkedRuns.has(run.folder_path));
+          } else {
+            selectRun(run.folder_path);
+          }
+        });
         runRows.appendChild(tr);
       });
     }
@@ -462,35 +560,76 @@
       renderPlotRunList();
       renderSelectionStatus();
     }
+    function handleCheckedGesture(visibleRuns, index, event, checked) {
+      const run = visibleRuns[index];
+      if (!run) return;
+      if (event.shiftKey && lastCheckedFolderPath) {
+        const start = visibleRuns.findIndex(item => item.folder_path === lastCheckedFolderPath);
+        const end = index;
+        if (start >= 0) {
+          const min = Math.min(start, end);
+          const max = Math.max(start, end);
+          for (let i = min; i <= max; i += 1) {
+            if (checked) checkedRuns.add(visibleRuns[i].folder_path);
+            else checkedRuns.delete(visibleRuns[i].folder_path);
+          }
+        } else if (checked) {
+          checkedRuns.add(run.folder_path);
+        } else {
+          checkedRuns.delete(run.folder_path);
+        }
+      } else if (checked) {
+        checkedRuns.add(run.folder_path);
+      } else {
+        checkedRuns.delete(run.folder_path);
+      }
+      lastCheckedFolderPath = run.folder_path;
+      selected = run;
+      renderRows();
+      renderPlotRunList();
+      renderSelectionStatus();
+      renderSelected();
+    }
     function renderSelectionStatus() {
       const count = checkedRuns.size;
       document.getElementById("selectionStatus").textContent = count ? `${count} selected for rerun` : "0 selected";
-      rerunSelectedButton.textContent = count ? `Rerun ${count} Selected` : "Rerun Selected";
+      rerunSelectedButton.textContent = standaloneMode
+        ? "Rerun Needs Python"
+        : (count ? `Rerun ${count} Selected` : "Rerun Selected");
     }
     function renderPlotRunList() {
       const needle = plotSearch.value.trim().toLowerCase();
       const plotRuns = needle ? filtered.filter(run => searchBlob(run).includes(needle)) : filtered;
       document.getElementById("plotCount").textContent = `${plotRuns.length} runs`;
       plotRunList.innerHTML = "";
-      plotRuns.forEach(run => {
+      plotRuns.forEach((run, index) => {
         const item = document.createElement("div");
         item.className = selected && selected.folder_path === run.folder_path ? "compact-run-item active" : "compact-run-item";
         item.innerHTML = `
           <input class="plot-run-check" type="checkbox" ${checkedRuns.has(run.folder_path) ? "checked" : ""} aria-label="Select ${text(run.folder_name)} for rerun">
           <div>
             <div class="compact-main">
-              <span>${text(run.date)}</span>
+              <span>${starIcon(run.star)} ${text(run.date)}</span>
               <span>${text(run.attenuation_factor)}x</span>
             </div>
-            <div class="compact-sub">${text(run.sample)} - ${text(run.exp_tag)}</div>
-            <div class="compact-sub">OPO ${text(run.use_opo)} | ${text(run.wavelength_nm)} nm</div>
+            <div class="compact-sub">${text(run.sample)} - ${text((run.tags || []).join(", "))}</div>
+            <div class="compact-sub">${text(run.description)}</div>
+            <div class="compact-sub">OPO ${text(run.use_opo)} | ${text(run.wavelength_nm)} nm | ${text(run.scan_rate)} mm/s</div>
             <div class="compact-sub">${text(run.folder_name)}</div>
           </div>
         `;
         const checkbox = item.querySelector(".plot-run-check");
-        checkbox.addEventListener("click", event => event.stopPropagation());
-        checkbox.addEventListener("change", () => toggleRunChecked(run.folder_path, checkbox.checked));
-        item.addEventListener("click", () => selectRun(run.folder_path));
+        checkbox.addEventListener("click", event => {
+          event.stopPropagation();
+          handleCheckedGesture(plotRuns, index, event, !checkedRuns.has(run.folder_path));
+        });
+        item.addEventListener("click", event => {
+          if (event.shiftKey || event.ctrlKey || event.metaKey) {
+            handleCheckedGesture(plotRuns, index, event, !checkedRuns.has(run.folder_path));
+          } else {
+            selectRun(run.folder_path);
+          }
+        });
         plotRunList.appendChild(item);
       });
     }
@@ -506,25 +645,32 @@
     function renderSelected() {
       if (!selected) {
         document.getElementById("selectedTitle").textContent = "Nothing selected";
+        document.getElementById("selectedDescription").textContent = "";
         document.getElementById("selectedPath").textContent = "";
         document.getElementById("metrics").innerHTML = "";
         document.querySelectorAll(".card .card-body").forEach(body => { body.textContent = "Select a run"; });
         return;
       }
-      document.getElementById("selectedTitle").textContent = `${text(selected.sample)}   ${text(selected.date)}`;
+      const titleNote = selected.dark_noise_note ? ` | ${selected.dark_noise_note}` : "";
+      document.getElementById("selectedTitle").textContent = `${selected.star ? "\u2605 " : ""}${text(selected.sample)}   ${text(selected.date)}${titleNote}`;
+      document.getElementById("selectedDescription").textContent = selected.description || "";
       document.getElementById("selectedPath").textContent = selected.folder_path;
-      document.getElementById("toggleStar").textContent = selected.star ? "Unstar" : "Star";
+      document.getElementById("toggleStar").textContent = selected.star ? "\u2605 Starred" : "\u2606 Star";
       document.getElementById("metrics").innerHTML = [
         renderMetric("Run", selected.folder_name),
+        renderMetric("Description", selected.description),
         renderMetric("Tags", (selected.tags || []).join(", ")),
         renderMetric("Use OPO", selected.use_opo),
+        renderMetric("Polarizer", selected.polarizer),
         renderMetric("Wavelength nm", selected.wavelength_nm),
         renderMetric("Atten. Factor", selected.attenuation_factor),
         renderMetric("Shot Noise", selected.shot_noise),
+        renderMetric("Dark Noise Config", selected.dark_noise_note),
         renderMetric("Port Power", selected.port_power),
         renderMetric("Sample Power", selected.sample_power),
         renderMetric("Temperature K", selected.temperature),
-        renderMetric("Range mm", selected.scan_range)
+        renderMetric("Range mm", selected.scan_range),
+        renderMetric("Scan Rate mm/s", selected.scan_rate)
       ].join("");
       document.querySelectorAll(".card").forEach(card => {
         const key = card.dataset.kind;
@@ -548,23 +694,54 @@
     function setAnalysisStatus(message) {
       document.getElementById("analysisStatus").textContent = message || "";
     }
+    function setAnalysisProgress(data) {
+      const wrap = document.getElementById("analysisProgress");
+      const track = wrap.querySelector(".progress-track");
+      const fill = document.getElementById("analysisProgressFill");
+      const label = document.getElementById("analysisProgressLabel");
+      const running = data && data.running;
+      const percent = Math.max(0, Math.min(100, Number(data && data.progress_percent) || 0));
+      if (!running && percent <= 0) {
+        wrap.style.display = "none";
+        return;
+      }
+      wrap.style.display = "block";
+      fill.style.width = `${percent}%`;
+      track.setAttribute("aria-valuenow", String(percent));
+      const current = Number(data && data.current_run) || 0;
+      const total = Number(data && data.total_runs) || 0;
+      const runText = total > 1 && current ? `Run ${current} of ${total} - ` : "";
+      label.textContent = `${runText}${percent}%`;
+      if (!running && percent >= 100) {
+        setTimeout(() => {
+          wrap.style.display = "none";
+          fill.style.width = "0%";
+          track.setAttribute("aria-valuenow", "0");
+          label.textContent = "0%";
+        }, 2500);
+      }
+    }
     function rerunTargets(useCurrentOnly = false) {
       if (useCurrentOnly && selected) return [selected.folder_path];
-      if (checkedRuns.size) return Array.from(checkedRuns);
-      return selected ? [selected.folder_path] : [];
+      return Array.from(checkedRuns);
     }
     async function rerunSelected(useCurrentOnly = false) {
+      if (standaloneMode) {
+        alert("Rerun analysis needs Python because browsers cannot launch cm_pipeline_all_in_one.py from a standalone HTML file.");
+        return;
+      }
       const folderPaths = rerunTargets(useCurrentOnly);
       if (!folderPaths.length) {
-        alert("Select at least one run first.");
+        alert(useCurrentOnly ? "Select a run first." : "Check at least one run first, or use Rerun This Run for the highlighted run.");
         return;
       }
       const label = folderPaths.length === 1 ? "1 run" : `${folderPaths.length} runs`;
       const preview = folderPaths.slice(0, 8).map(path => path.split(/[\\/]/).pop()).join("\n");
       const extra = folderPaths.length > 8 ? `\n... and ${folderPaths.length - 8} more` : "";
-      if (!confirm(`Rerun cm_pipeline_all_in_one.py for ${label}?\n\n${preview}${extra}`)) return;
+      if (!confirm(`Force rerun cm_pipeline_all_in_one.py for ${label}?\n\n${preview}${extra}`)) return;
       const data = await postJson("/api/rerun", { folder_paths: folderPaths });
       setAnalysisStatus(data.message || "Running analysis...");
+      setAnalysisProgress({ running: true, progress_percent: 0, current_run: 0, total_runs: folderPaths.length });
       startAnalysisPoll();
     }
     function startAnalysisPoll() {
@@ -575,6 +752,7 @@
           if (!response.ok) throw new Error(await response.text());
           const data = await response.json();
           setAnalysisStatus(data.message || (data.running ? "Running analysis..." : ""));
+          setAnalysisProgress(data);
           if (!data.running) {
             clearInterval(analysisPoll);
             analysisPoll = null;
@@ -590,6 +768,19 @@
       analysisPoll = setInterval(poll, 2500);
     }
     async function loadRuns(rebuild = false) {
+      if (standaloneMode) {
+        if (!standaloneRootHandle) {
+          document.getElementById("root").textContent = "Standalone HTML mode. Choose your DataFiles folder to begin.";
+          runs = [];
+          selected = null;
+          checkedRuns.clear();
+          applyFilters();
+          renderSelected();
+          return;
+        }
+        await scanStandaloneRuns();
+        return;
+      }
       const url = rebuild ? "/api/runs?rebuild=1" : "/api/runs";
       const response = await fetch(url);
       if (!response.ok) throw new Error(await response.text());
@@ -607,12 +798,14 @@
       if (folderPath && runs.some(run => run.folder_path === folderPath)) selectRun(folderPath);
     }
     async function refreshAfterExternalEdit() {
+      if (standaloneMode) return;
       const now = Date.now();
       if (now - lastFocusRefresh < 1500) return;
       lastFocusRefresh = now;
       await reloadPreservingSelection(false);
     }
     async function postJson(url, payload) {
+      if (standaloneMode) throw new Error("This action needs the Python helper server.");
       const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -621,7 +814,342 @@
       if (!response.ok) throw new Error(await response.text());
       return response.json();
     }
-    async function openPath(path) { await postJson("/api/open", { path }); }
+    async function openPath(path) {
+      if (standaloneMode) {
+        const url = assetUrl(path);
+        if (url) window.open(url, "_blank", "noopener");
+        else alert("No browser preview is available for this item.");
+        return;
+      }
+      await postJson("/api/open", { path });
+    }
+    function safeText(value, fallback = "") {
+      if (value === undefined || value === null) return fallback;
+      if (typeof value === "string") return value.trim();
+      if (typeof value === "number" || typeof value === "boolean") return String(value);
+      if (Array.isArray(value)) return value.map(item => safeText(item)).filter(Boolean).join(", ");
+      return fallback;
+    }
+    function safeTags(value) {
+      if (Array.isArray(value)) return value.map(item => safeText(item)).filter(Boolean);
+      if (typeof value === "string") return value.split(",").map(item => item.trim()).filter(Boolean);
+      return [];
+    }
+    function hasDarkNoiseTag(tags) {
+      return (tags || [])
+        .map(tag => safeText(tag).toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim())
+        .includes("dark noise");
+    }
+    function canonicalizeDarkNoiseTags(tags) {
+      const result = [];
+      let hasDarkNoise = false;
+      (tags || []).forEach(tag => {
+        const clean = safeText(tag);
+        const normalized = clean.toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+        if (normalized === "dark noise") {
+          hasDarkNoise = true;
+        } else if (clean) {
+          result.push(clean);
+        }
+      });
+      if (hasDarkNoise) result.push(darkNoiseTagName);
+      return result;
+    }
+    function nestedValue(payload, path) {
+      let current = payload;
+      for (const key of path) {
+        if (!current || typeof current !== "object" || !(key in current)) return null;
+        current = current[key];
+      }
+      return current;
+    }
+    function firstValue(payload, paths) {
+      for (const path of paths) {
+        const value = nestedValue(payload, path);
+        if (value !== null && value !== undefined && value !== "") return value;
+      }
+      return null;
+    }
+    function firstFloat(payload, paths) {
+      const value = firstValue(payload, paths);
+      if (value === null) return null;
+      const number = Number(value);
+      return Number.isFinite(number) ? number : null;
+    }
+    function safeBool(value) {
+      if (typeof value === "boolean") return value;
+      if (typeof value === "number") return value !== 0;
+      if (typeof value === "string") return ["1", "true", "yes", "y", "on", "star", "starred"].includes(value.trim().toLowerCase());
+      return false;
+    }
+    function formatNumber(value, digits = 3) {
+      return value === null || value === undefined || !Number.isFinite(value) ? "-" : Number(value).toPrecision(digits);
+    }
+    function formatGeneral(value) {
+      if (value === null || value === undefined || !Number.isFinite(value)) return "-";
+      return Number(value).toString();
+    }
+    function formatFixed(value, digits) {
+      return value === null || value === undefined || !Number.isFinite(value) ? "-" : Number(value).toFixed(digits);
+    }
+    function parseFolderDate(folderName, fallbackDate) {
+      const match = folderName.match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+      if (!match) return fallbackDate || new Date(0);
+      const [, y, mo, d, h, mi, s] = match;
+      return new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s));
+    }
+    function dateDisplay(date) {
+      if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "-";
+      const pad = number => String(number).padStart(2, "0");
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }
+    function useOpoDisplay(payload) {
+      const value = firstValue(payload, [
+        ["PhysicsData", "UseOPO"], ["PhysicsData", "UseOpo"], ["PhysicsData", "Use_OPO"], ["PhysicsData", "UseOPOOption"],
+        ["PhysicsData", "OPOEnabled"], ["PhysicsData", "OPO"], ["Configuration", "UseOPO"], ["Configuration", "UseOpo"],
+        ["Configuration", "UseOPOOption"], ["Configuration", "OPOEnabled"], ["UseOPO"], ["UseOpo"], ["UseOPOOption"],
+        ["OPOEnabled"], ["OPO"]
+      ]);
+      if (value === null) return { display: "-", sort: -1 };
+      const enabled = safeBool(value);
+      return { display: enabled ? "Yes" : "No", sort: enabled ? 1 : 0 };
+    }
+    function polarizerDisplay(payload) {
+      const usedValue = firstValue(payload, [
+        ["PhysicsData", "PolarizerUsed"], ["PhysicsData", "UsePolarizer"], ["PhysicsData", "PolarizerApplied"],
+        ["Configuration", "PolarizerUsed"], ["Configuration", "UsePolarizer"], ["PolarizerUsed"], ["UsePolarizer"], ["PolarizerApplied"]
+      ]);
+      const name = safeText(firstValue(payload, [["PhysicsData", "Polarizer"], ["PhysicsData", "PolarizerName"], ["Configuration", "Polarizer"], ["Configuration", "PolarizerName"], ["Polarizer"], ["PolarizerName"]]));
+      const ratio = safeText(firstValue(payload, [["PhysicsData", "PolarizerExtinctionRatio"], ["PhysicsData", "PolarizerExtinctionRatioText"], ["PhysicsData", "ExtinctionRatio"], ["Configuration", "PolarizerExtinctionRatio"], ["Configuration", "ExtinctionRatio"], ["PolarizerExtinctionRatio"], ["ExtinctionRatio"]]));
+      if (usedValue === null && !name && !ratio) return "-";
+      if (usedValue !== null && !safeBool(usedValue)) return "No";
+      const parts = [];
+      if (usedValue !== null && safeBool(usedValue)) parts.push("Yes");
+      if (name) parts.push(name);
+      if (ratio) parts.push(`ER ${ratio}`);
+      return parts.length ? parts.join(" / ") : "Yes";
+    }
+    function attenuationFactor(payload) {
+      const applied = safeBool(firstValue(payload, [
+        ["PhysicsData", "PowerDetectorAttenuatorApplied"],
+        ["PowerDetectorAttenuatorApplied"]
+      ]));
+      if (!applied) return 1;
+      const stored = firstFloat(payload, [
+        ["PhysicsData", "PowerDetectorAttenuatorCorrectionFactor"],
+        ["PowerDetectorAttenuatorCorrectionFactor"]
+      ]);
+      if (stored !== null && stored > 0) return stored;
+      let totalDb = firstFloat(payload, [
+        ["PhysicsData", "PowerDetectorAttenuatorTotal_dB"],
+        ["PowerDetectorAttenuatorTotal_dB"]
+      ]);
+      if (totalDb === null || totalDb <= 0) totalDb = 40;
+      return 10 ** (totalDb / 20);
+    }
+    function shotNoiseValues(payload, tags = []) {
+      const unit = safeText(firstValue(payload, [["PhysicsData", "ShotNoiseUnit"], ["ShotNoiseUnit"]])).toLowerCase();
+      const darkByTag = hasDarkNoiseTag(tags.length ? tags : safeTags(payload.Tags));
+      const dark = darkByTag || safeBool(firstValue(payload, [["PhysicsData", "IsDarkNoiseRun"], ["IsDarkNoiseRun"], ["DarkNoise"], ["PhysicsData", "DarkNoise"]]));
+      const syntheticApplied = darkByTag || safeBool(firstValue(payload, [["PhysicsData", "SyntheticConversionFactorApplied"], ["SyntheticConversionFactorApplied"]]));
+      const syntheticFactor = firstFloat(payload, [["PhysicsData", "SyntheticConversionFactor_V2_rad2"], ["SyntheticConversionFactor_V2_rad2"]]) || darkNoiseSyntheticConversionFactor;
+      const urad = firstFloat(payload, [["PhysicsData", "ShotNoiseResult_urad2_rtHz"], ["PhysicsData", "ShotNoise_urad2_rtHz"], ["ShotNoiseResult_urad2_rtHz"], ["ShotNoise_urad2_rtHz"]]);
+      const volts = firstFloat(payload, [["PhysicsData", "ShotNoiseResult_V2_rtHz"], ["PhysicsData", "ShotNoise_V2_rtHz"], ["ShotNoiseResult_V2_rtHz"], ["ShotNoise_V2_rtHz"]]);
+      if (urad !== null) return { value: formatFixed(urad, 2), unit: "urad^2/rtHz" };
+      if (volts !== null && dark && syntheticApplied && syntheticFactor > 0) return { value: formatFixed(volts / syntheticFactor * 1e12, 2), unit: "urad^2/rtHz" };
+      if (volts !== null && (dark || unit.startsWith("v"))) return { value: formatNumber(volts, 3), unit: "V^2/rtHz" };
+      if (volts !== null) return { value: formatNumber(volts, 3), unit: "V^2/rtHz" };
+      return { value: "-", unit: safeText(unit) };
+    }
+    async function getFileHandleOrNull(directoryHandle, name) {
+      try { return await directoryHandle.getFileHandle(name); }
+      catch { return null; }
+    }
+    async function firstExistingHandle(directoryHandle, names) {
+      for (const name of names) {
+        const handle = await getFileHandleOrNull(directoryHandle, name);
+        if (handle) return { name, handle };
+      }
+      return null;
+    }
+    async function readJsonHandle(fileHandle) {
+      if (!fileHandle) return {};
+      try {
+        const file = await fileHandle.getFile();
+        return JSON.parse(await file.text());
+      } catch {
+        return {};
+      }
+    }
+    async function objectUrlFor(handle, key) {
+      if (!handle) return "";
+      const file = await handle.getFile();
+      const previous = objectUrls.get(key);
+      if (previous) URL.revokeObjectURL(previous);
+      const url = URL.createObjectURL(file);
+      objectUrls.set(key, url);
+      return url;
+    }
+    async function ensureWritePermission(handle) {
+      if (!handle || !("queryPermission" in handle) || !("requestPermission" in handle)) return true;
+      const options = { mode: "readwrite" };
+      if (await handle.queryPermission(options) === "granted") return true;
+      return await handle.requestPermission(options) === "granted";
+    }
+    async function serializeStandaloneRun(rootName, folderName, directoryHandle) {
+      const finalHandle = await getFileHandleOrNull(directoryHandle, finalResultName);
+      if (!finalHandle) return null;
+      const metadataHandle = await getFileHandleOrNull(directoryHandle, "metadata.json");
+      const movieHandle = await getFileHandleOrNull(directoryHandle, movieName);
+      const loglogHandle = await getFileHandleOrNull(directoryHandle, loglogPlotName);
+      const diagonal = await firstExistingHandle(directoryHandle, diagonalOffsetPlotNames);
+      const rawStd = await firstExistingHandle(directoryHandle, rawStdPlotNames);
+      const metadata = await readJsonHandle(metadataHandle);
+      let sortableDate = parseFolderDate(folderName);
+      if (typeof metadata.Timestamp === "string") {
+        const metadataDate = new Date(metadata.Timestamp);
+        if (!Number.isNaN(metadataDate.getTime())) sortableDate = metadataDate;
+      }
+      const folderPath = `${rootName}/${folderName}`;
+      const pathFor = name => name ? `${folderPath}/${name}` : "";
+      const useOpo = useOpoDisplay(metadata);
+      const atten = attenuationFactor(metadata);
+      const wavelength = firstFloat(metadata, [
+        ["PhysicsData", "LaserWavelength_nm"], ["PhysicsData", "LaserWavelengthNm"], ["PhysicsData", "LaserWavelength"],
+        ["PhysicsData", "Wavelength_nm"], ["PhysicsData", "WavelengthNm"], ["PhysicsData", "Wavelength"],
+        ["Configuration", "LaserWavelength_nm"], ["Configuration", "LaserWavelengthNm"], ["Configuration", "Wavelength_nm"],
+        ["LaserWavelength_nm"], ["LaserWavelengthNm"], ["LaserWavelength"], ["Wavelength_nm"], ["WavelengthNm"], ["Wavelength"]
+      ]);
+      const tempK = firstFloat(metadata, [["PhysicsData", "Temperature_K"], ["PhysicsData", "EnvironmentTemperature_K"], ["Temperature_K"], ["EnvironmentTemperature_K"]]);
+      const tempC = firstFloat(metadata, [["PhysicsData", "Temperature_C"], ["PhysicsData", "EnvironmentTemperature_C"], ["Temperature_C"], ["EnvironmentTemperature_C"]]);
+      const scanMin = firstFloat(metadata, [["PhysicsData", "ScanMin_mm"], ["ScanMin_mm"]]);
+      const scanMax = firstFloat(metadata, [["PhysicsData", "ScanMax_mm"], ["ScanMax_mm"]]);
+      let scanRange = firstFloat(metadata, [["PhysicsData", "ScanRange_mm"], ["ScanRange_mm"]]);
+      if (scanRange === null && scanMin !== null && scanMax !== null) scanRange = Math.abs(scanMax - scanMin);
+      const scanRate = firstFloat(metadata, [
+        ["PhysicsData", "ScanVelocity_mm_s"], ["PhysicsData", "ScanRate_mm_s"], ["PhysicsData", "ESPScanVelocity_mm_s"],
+        ["Configuration", "ScanVelocity_mm_s"], ["Configuration", "ScanRate_mm_s"], ["Configuration", "ESPScanVelocity_mm_s"],
+        ["ScanVelocity_mm_s"], ["ScanRate_mm_s"], ["ESPScanVelocity_mm_s"]
+      ]);
+      let samplePower = firstFloat(metadata, [
+        ["OnSamplePower_mW"], ["PhysicsData", "OnSamplePower_mW"], ["SamplePower_mW"], ["SamplePower_mW_1"],
+        ["PhysicsData", "SamplePower_mW"], ["PhysicsData", "SamplePower_mW_1"], ["PhysicsData", "Power_mW_1"], ["Power_mW_1"]
+      ]);
+      let power1 = firstFloat(metadata, [["PhysicsData", "Power_mW_1"], ["Power_mW_1"], ["PhysicsData", "Port1Power_mW"], ["Port1Power_mW"]]);
+      let power2 = firstFloat(metadata, [["PhysicsData", "Power_mW_2"], ["Power_mW_2"], ["PhysicsData", "Port2Power_mW"], ["Port2Power_mW"]]);
+      const metadataText = metadataHandle ? await (await metadataHandle.getFile()).text() : "";
+      const tags = canonicalizeDarkNoiseTags(safeTags(metadata.Tags));
+      const shot = shotNoiseValues(metadata, tags);
+      if (hasDarkNoiseTag(tags)) {
+        samplePower = darkNoiseTagPowerEstimateMw;
+        power1 = darkNoiseTagPortPowerEstimateMw;
+        power2 = darkNoiseTagPortPowerEstimateMw;
+      }
+      const darkNoiseNote = hasDarkNoiseTag(tags)
+        ? darkNoiseSyntheticNote()
+        : "";
+      const run = {
+        folder_name: folderName,
+        folder_path: folderPath,
+        date: dateDisplay(sortableDate),
+        date_sort: sortableDate.toISOString(),
+        sample: safeText(metadata.Sample),
+        exp_tag: safeText(firstValue(metadata, [["ExperimentTag"], ["ExpTag"], ["Experiment"], ["ExperimentName"], ["Configuration", "ExperimentTag"], ["Configuration", "ExpTag"], ["PhysicsData", "ExperimentTag"], ["PhysicsData", "ExpTag"]])),
+        description: safeText(metadata.Description),
+        tags,
+        filename: safeText(metadata.Filename),
+        duration: safeText(metadata.Duration),
+        star: safeBool(firstValue(metadata, [
+          ["StarMeasurement"], ["StarredMeasurement"], ["IsStarMeasurement"], ["IsStarred"],
+          ["PhysicsData", "StarMeasurement"], ["PhysicsData", "StarredMeasurement"],
+          ["PhysicsData", "IsStarMeasurement"], ["PhysicsData", "IsStarred"]
+        ])),
+        port_power: power1 !== null && power2 !== null ? `${power1.toFixed(3)} / ${power2.toFixed(3)}` : power1 !== null ? power1.toFixed(3) : power2 !== null ? power2.toFixed(3) : "-",
+        sample_power: samplePower !== null ? samplePower.toFixed(3) : "-",
+        attenuation_factor: formatGeneral(atten),
+        attenuation_factor_sort: atten,
+        use_opo: useOpo.display,
+        use_opo_sort: useOpo.sort,
+        polarizer: polarizerDisplay(metadata),
+        wavelength_nm: formatGeneral(wavelength),
+        wavelength_nm_sort: wavelength,
+        temperature: tempK !== null ? tempK.toFixed(2) : tempC !== null ? (tempC + 273.15).toFixed(2) : "-",
+        shot_noise: shot.value === "-" ? "-" : `${shot.value} ${shot.unit}`,
+        shot_noise_value: shot.value,
+        dark_noise_note: darkNoiseNote,
+        scan_range: scanRange !== null ? scanRange.toFixed(3) : "-",
+        scan_rate: scanRate !== null ? `${scanRate}` : "-",
+        scan_rate_sort: scanRate,
+        center: scanMin !== null && scanMax !== null ? ((scanMin + scanMax) / 2).toFixed(4) : "-",
+        final_result_path: pathFor(finalResultName),
+        movie_path: movieHandle ? pathFor(movieName) : "",
+        loglog_plot_path: loglogHandle ? pathFor(loglogPlotName) : "",
+        diagonal_offset_path: diagonal ? pathFor(diagonal.name) : "",
+        raw_std_plot_path: rawStd ? pathFor(rawStd.name) : "",
+        metadata_path: metadataHandle ? pathFor("metadata.json") : "",
+        metadata_text: metadataText,
+        _handles: { directoryHandle, metadataHandle, finalHandle, movieHandle, loglogHandle, diagonalHandle: diagonal && diagonal.handle, rawStdHandle: rawStd && rawStd.handle }
+      };
+      await objectUrlFor(finalHandle, run.final_result_path);
+      if (movieHandle) await objectUrlFor(movieHandle, run.movie_path);
+      if (loglogHandle) await objectUrlFor(loglogHandle, run.loglog_plot_path);
+      if (diagonal) await objectUrlFor(diagonal.handle, run.diagonal_offset_path);
+      if (rawStd) await objectUrlFor(rawStd.handle, run.raw_std_plot_path);
+      if (metadataHandle) await objectUrlFor(metadataHandle, run.metadata_path);
+      return run;
+    }
+    async function scanStandaloneRuns() {
+      setAnalysisStatus("Scanning selected folder in the browser...");
+      const previousSelection = selected && selected.folder_path;
+      for (const url of objectUrls.values()) URL.revokeObjectURL(url);
+      objectUrls = new Map();
+      const scanned = [];
+      for await (const [name, handle] of standaloneRootHandle.entries()) {
+        if (handle.kind !== "directory") continue;
+        const run = await serializeStandaloneRun(standaloneRootHandle.name, name, handle);
+        if (run) scanned.push(run);
+      }
+      runs = scanned;
+      document.getElementById("root").textContent = `${standaloneRootHandle.name} (standalone HTML mode)`;
+      const validFolders = new Set(runs.map(run => run.folder_path));
+      checkedRuns = new Set(Array.from(checkedRuns).filter(folderPath => validFolders.has(folderPath)));
+      selected = null;
+      applyFilters();
+      if (previousSelection && runs.some(run => run.folder_path === previousSelection)) selectRun(previousSelection);
+      setAnalysisStatus(`Loaded ${runs.length} runs directly from the selected folder.`);
+    }
+    async function chooseStandaloneFolder() {
+      if (!("showDirectoryPicker" in window)) {
+        alert("This browser does not support folder access from standalone HTML. Use Chrome or Edge, or launch datafiles_browser.py.");
+        return;
+      }
+      try {
+        standaloneRootHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+      } catch (err) {
+        if (err && err.name === "AbortError") throw err;
+        standaloneRootHandle = await window.showDirectoryPicker();
+      }
+      await scanStandaloneRuns();
+    }
+    async function toggleStandaloneStar() {
+      if (!selected) return;
+      const folderPath = selected.folder_path;
+      const directoryHandle = selected._handles && selected._handles.directoryHandle;
+      if (!directoryHandle) return;
+      if (!(await ensureWritePermission(directoryHandle))) {
+        alert("The browser does not have write permission for this folder. Choose the folder again and allow edit access to update stars.");
+        return;
+      }
+      const metadataHandle = selected._handles.metadataHandle || await directoryHandle.getFileHandle("metadata.json", { create: true });
+      const payload = await readJsonHandle(metadataHandle);
+      payload.StarMeasurement = !selected.star;
+      const writable = await metadataHandle.createWritable();
+      await writable.write(JSON.stringify(payload, null, 2));
+      await writable.close();
+      selected._handles.metadataHandle = metadataHandle;
+      await scanStandaloneRuns();
+      selectRun(folderPath);
+    }
     document.querySelectorAll("th[data-sort]").forEach(th => {
       th.addEventListener("click", () => {
         const next = th.dataset.sort;
@@ -635,21 +1163,48 @@
     plotSearch.addEventListener("input", renderPlotRunList);
     runListTabButton.addEventListener("click", () => setTab("runs"));
     plotsTabButton.addEventListener("click", () => setTab("plots"));
+    chooseFolderButton.addEventListener("click", () => {
+      if (standaloneMode) chooseStandaloneFolder().catch(err => setAnalysisStatus(err.message));
+      else alert("Folder picking is only used when index.html is opened directly as a standalone file.");
+    });
     document.getElementById("refresh").addEventListener("click", () => reloadPreservingSelection(false));
     rerunSelectedButton.addEventListener("click", () => rerunSelected(false).catch(err => alert(err.message)));
     document.getElementById("rerunThisRun").addEventListener("click", () => rerunSelected(true).catch(err => alert(err.message)));
     document.getElementById("rebuild").addEventListener("click", () => reloadPreservingSelection(true));
-    document.getElementById("allMetadata").addEventListener("click", () => postJson("/api/edit-all-metadata", {}));
+    document.getElementById("allMetadata").addEventListener("click", () => {
+      if (standaloneMode) alert("Bulk metadata editing needs metadata_manager.py. Standalone mode can browse runs and toggle stars.");
+      else postJson("/api/edit-all-metadata", {}).catch(err => alert(err.message));
+    });
     document.getElementById("openFolder").addEventListener("click", () => selected && openPath(selected.folder_path));
     document.getElementById("playMp4").addEventListener("click", () => selected && selected.movie_path && openPath(selected.movie_path));
-    document.getElementById("editMetadata").addEventListener("click", () => selected && postJson("/api/edit-metadata", { path: selected.metadata_path || selected.folder_path }));
+    document.getElementById("editMetadata").addEventListener("click", () => {
+      if (!selected) return;
+      if (standaloneMode) openPath(selected.metadata_path);
+      else postJson("/api/edit-metadata", { path: selected.metadata_path || selected.folder_path }).catch(err => alert(err.message));
+    });
     document.getElementById("toggleStar").addEventListener("click", async () => {
       if (!selected) return;
+      if (standaloneMode) {
+        await toggleStandaloneStar();
+        return;
+      }
       const folderPath = selected.folder_path;
-      await postJson("/api/star", { folder_path: selected.folder_path, star: !selected.star });
+      const data = await postJson("/api/star", { folder_path: selected.folder_path, star: !selected.star });
+      const index = runs.findIndex(run => run.folder_path === folderPath);
+      if (index >= 0 && data.run) runs[index] = data.run;
       await loadRuns(false);
       selectRun(folderPath);
     });
+    if (standaloneMode) {
+      document.getElementById("rerunThisRun").disabled = true;
+      document.getElementById("openFolder").disabled = true;
+      rerunSelectedButton.disabled = true;
+      document.getElementById("allMetadata").disabled = true;
+      document.getElementById("rebuild").textContent = "Rescan Folder";
+      document.getElementById("refresh").textContent = "Refresh Folder";
+    } else {
+      chooseFolderButton.style.display = "none";
+    }
     window.addEventListener("focus", () => refreshAfterExternalEdit().catch(err => setAnalysisStatus(err.message)));
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) refreshAfterExternalEdit().catch(err => setAnalysisStatus(err.message));

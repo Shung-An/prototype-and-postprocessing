@@ -8,13 +8,22 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 DEFAULT_ROOT = Path(r"D:\Quantum Squeezing Project\DataFiles")
+DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW = 0.01
+DARK_NOISE_TAG_POWER_ESTIMATE_MW = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW * 2.0
+DARK_NOISE_SYNTHETIC_WAVELENGTH_NM = 1550.0
+DARK_NOISE_SYNTHETIC_RESPONSIVITY_A_PER_W = 1.02
+DARK_NOISE_SYNTHETIC_REFERENCE_RESPONSIVITY_A_PER_W = 1.02
+DARK_NOISE_SYNTHETIC_DETECTOR_VOLTAGE_PER_MW = 10.0
+DARK_NOISE_SYNTHETIC_REP_RATE_HZ = 7.6e7
+DARK_NOISE_SYNTHETIC_RESPONSE_TIME_S = 3.5e-9
+DARK_NOISE_TAG_NAME = "Dark Noise"
+DARK_NOISE_TAG_KEY = "dark noise"
 
 FIELD_SPECS = [
     ("Sample", "Sample", "text"),
     ("Experiment Tag", "ExperimentTag", "text"),
     ("Description", "Description", "text"),
     ("Tags", "Tags", "tags"),
-    ("Filename", "Filename", "text"),
     ("Duration", "Duration", "text"),
     ("Star Measurement", "StarMeasurement", "bool"),
     ("Temperature K", "PhysicsData.Temperature_K", "float"),
@@ -23,6 +32,9 @@ FIELD_SPECS = [
     ("Power 1 mW", "PhysicsData.Power_mW_1", "float"),
     ("Power 2 mW", "PhysicsData.Power_mW_2", "float"),
     ("Use OPO", "PhysicsData.UseOPO", "bool"),
+    ("Polarizer Used", "PhysicsData.PolarizerUsed", "bool"),
+    ("Polarizer", "PhysicsData.Polarizer", "text"),
+    ("Polarizer Extinction Ratio", "PhysicsData.PolarizerExtinctionRatio", "text"),
     ("Attenuator Applied", "PhysicsData.PowerDetectorAttenuatorApplied", "bool"),
     ("Attenuator Count", "PhysicsData.PowerDetectorAttenuatorCount", "float"),
     ("Attenuator Each dB", "PhysicsData.PowerDetectorAttenuatorEach_dB", "float"),
@@ -36,8 +48,48 @@ FIELD_SPECS = [
     ("Scan Range mm", "PhysicsData.ScanRange_mm", "float"),
     ("Scan Min mm", "PhysicsData.ScanMin_mm", "float"),
     ("Scan Max mm", "PhysicsData.ScanMax_mm", "float"),
+    ("Scan Rate mm/s", "PhysicsData.ScanVelocity_mm_s", "float"),
 ]
 HTML_EDITOR_SERVERS: list[object] = []
+
+
+def estimate_dark_noise_synthetic_conversion_factor_v2_rad2(
+    port_power_mw: float = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW,
+    wavelength_nm: float = DARK_NOISE_SYNTHETIC_WAVELENGTH_NM,
+    responsivity_a_per_w: float = DARK_NOISE_SYNTHETIC_RESPONSIVITY_A_PER_W,
+    reference_responsivity_a_per_w: float = DARK_NOISE_SYNTHETIC_REFERENCE_RESPONSIVITY_A_PER_W,
+    detector_voltage_per_mw: float = DARK_NOISE_SYNTHETIC_DETECTOR_VOLTAGE_PER_MW,
+    rep_rate_hz: float = DARK_NOISE_SYNTHETIC_REP_RATE_HZ,
+    response_time_s: float = DARK_NOISE_SYNTHETIC_RESPONSE_TIME_S,
+) -> float:
+    planck_constant = 6.62607015e-34
+    speed_of_light = 299792458.0
+    photon_energy_j = planck_constant * speed_of_light / (wavelength_nm * 1e-9)
+    port_power_w = port_power_mw * 1e-3
+    photons_per_pulse = port_power_w / (photon_energy_j * rep_rate_hz)
+    sensitivity = (
+        responsivity_a_per_w
+        * photon_energy_j
+        / response_time_s
+        * detector_voltage_per_mw
+        * 1e3
+        / reference_responsivity_a_per_w
+    )
+    conversion_per_port = 2.0 * photons_per_pulse * sensitivity
+    return conversion_per_port * conversion_per_port
+
+
+DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2 = estimate_dark_noise_synthetic_conversion_factor_v2_rad2()
+
+
+def dark_noise_synthetic_note(factor: float | None = None) -> str:
+    value = factor if factor is not None and factor > 0 else DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2
+    return (
+        f"{DARK_NOISE_TAG_NAME} tag: synthetic conversion factor {value:.6g} V^2/rad^2 applied "
+        f"from {DARK_NOISE_SYNTHETIC_WAVELENGTH_NM:g} nm, "
+        f"{DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW:g} mW per detector port; "
+        "results shown in artificial urad^2"
+    )
 
 
 def safe_text(value: Any, default: str = "") -> str:
@@ -69,6 +121,36 @@ def safe_float_or_none(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def safe_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on", "star", "starred"}
+    return False
+
+
+def has_dark_noise_tag(tags: list[str]) -> bool:
+    normalized = {" ".join(tag.strip().lower().replace("_", " ").replace("-", " ").split()) for tag in tags}
+    return DARK_NOISE_TAG_KEY in normalized
+
+
+def canonicalize_dark_noise_tags(tags: list[str]) -> list[str]:
+    result: list[str] = []
+    has_dark_noise = False
+    for tag in tags:
+        normalized = " ".join(tag.strip().lower().replace("_", " ").replace("-", " ").split())
+        if normalized == DARK_NOISE_TAG_KEY:
+            has_dark_noise = True
+            continue
+        if tag.strip():
+            result.append(tag.strip())
+    if has_dark_noise:
+        result.append(DARK_NOISE_TAG_NAME)
+    return result
 
 
 def first_value(payload: dict[str, Any], *paths: tuple[str, ...]) -> Any:
@@ -105,9 +187,47 @@ def normalize_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         )
     )
     normalized["Description"] = safe_text(payload.get("Description"))
-    normalized["Tags"] = safe_tags(payload.get("Tags"))
-    normalized["Filename"] = safe_text(payload.get("Filename"))
+    normalized["Tags"] = canonicalize_dark_noise_tags(safe_tags(payload.get("Tags")))
+    normalized.pop("Filename", None)
     normalized["Duration"] = safe_text(payload.get("Duration"))
+
+    if has_dark_noise_tag(normalized["Tags"]):
+        physics["Power_mW_1"] = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW
+        physics["Power_mW_2"] = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW
+        physics["OnSamplePower_mW"] = DARK_NOISE_TAG_POWER_ESTIMATE_MW
+        physics["DarkNoiseTagPowerEstimate_mW"] = DARK_NOISE_TAG_POWER_ESTIMATE_MW
+        physics["DarkNoiseTagPortPowerEstimate_mW"] = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW
+        physics["DarkNoiseSyntheticWavelength_nm"] = DARK_NOISE_SYNTHETIC_WAVELENGTH_NM
+        physics["DarkNoiseSyntheticDetectorResponsivity_A_per_W"] = DARK_NOISE_SYNTHETIC_RESPONSIVITY_A_PER_W
+        physics["DarkNoiseSyntheticRepRate_Hz"] = DARK_NOISE_SYNTHETIC_REP_RATE_HZ
+        physics["DarkNoiseSyntheticResponseTime_s"] = DARK_NOISE_SYNTHETIC_RESPONSE_TIME_S
+        physics["IsDarkNoiseRun"] = True
+        physics["DarkNoiseLabel"] = DARK_NOISE_TAG_NAME
+        physics["DarkNoiseReason"] = (
+            f"metadata tag {DARK_NOISE_TAG_NAME} uses {DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW:g} mW per detector port "
+            f"at {DARK_NOISE_SYNTHETIC_WAVELENGTH_NM:g} nm and synthetic conversion factor "
+            f"{DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2:.6g} V^2/rad^2"
+        )
+        physics["DisplayAmplitudeUnit"] = "urad^2"
+        physics["SyntheticConversionFactorApplied"] = True
+        physics["SyntheticConversionFactor_V2_rad2"] = DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2
+        physics["SyntheticConversionFactorNote"] = dark_noise_synthetic_note()
+
+    polarizer_name = safe_text(first_value(payload, ("PhysicsData", "Polarizer"), ("Polarizer",)))
+    if polarizer_name:
+        physics["Polarizer"] = polarizer_name
+    polarizer_extinction_ratio = safe_text(
+        first_value(
+            payload,
+            ("PhysicsData", "PolarizerExtinctionRatio"),
+            ("PhysicsData", "PolarizerExtinctionRatioText"),
+            ("PhysicsData", "ExtinctionRatio"),
+            ("PolarizerExtinctionRatio",),
+            ("ExtinctionRatio",),
+        )
+    )
+    if polarizer_extinction_ratio:
+        physics["PolarizerExtinctionRatio"] = polarizer_extinction_ratio
 
     for key in (
         "Power_mW_1",
@@ -123,6 +243,7 @@ def normalize_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         "ScanRange_mm",
         "ScanMin_mm",
         "ScanMax_mm",
+        "ScanVelocity_mm_s",
         "PowerDetectorAttenuatorCount",
         "PowerDetectorAttenuatorEach_dB",
         "PowerDetectorAttenuatorTotal_dB",
@@ -132,17 +253,48 @@ def normalize_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         if value is not None:
             physics[key] = value
 
-    for key in ("UseOPO", "PowerDetectorAttenuatorApplied", "IsDarkNoiseRun", "StarMeasurement"):
-        value = first_value(payload, ("PhysicsData", key), (key,))
+    for key in ("UseOPO", "PolarizerUsed", "PowerDetectorAttenuatorApplied", "IsDarkNoiseRun", "StarMeasurement"):
+        if key == "StarMeasurement":
+            value = first_value(
+                payload,
+                ("StarMeasurement",),
+                ("StarredMeasurement",),
+                ("IsStarMeasurement",),
+                ("IsStarred",),
+                ("PhysicsData", "StarMeasurement"),
+                ("PhysicsData", "StarredMeasurement"),
+                ("PhysicsData", "IsStarMeasurement"),
+                ("PhysicsData", "IsStarred"),
+            )
+        else:
+            value = first_value(payload, ("PhysicsData", key), (key,))
         if value is not None:
-            if isinstance(value, str):
-                value = value.strip().lower() in {"1", "true", "yes", "on"}
-            else:
-                value = bool(value)
+            value = safe_bool(value)
             if key == "StarMeasurement":
                 normalized[key] = value
             else:
                 physics[key] = value
+
+    if has_dark_noise_tag(normalized["Tags"]):
+        physics["Power_mW_1"] = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW
+        physics["Power_mW_2"] = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW
+        physics["OnSamplePower_mW"] = DARK_NOISE_TAG_POWER_ESTIMATE_MW
+
+    scan_velocity = safe_float_or_none(
+        first_value(
+            payload,
+            ("PhysicsData", "ScanVelocity_mm_s"),
+            ("PhysicsData", "ScanRate_mm_s"),
+            ("PhysicsData", "ESPScanVelocity_mm_s"),
+            ("Configuration", "ScanVelocity_mm_s"),
+            ("Configuration", "ScanRate_mm_s"),
+            ("ScanVelocity_mm_s",),
+            ("ScanRate_mm_s",),
+            ("ESPScanVelocity_mm_s",),
+        )
+    )
+    if scan_velocity is not None:
+        physics["ScanVelocity_mm_s"] = scan_velocity
 
     normalized["PhysicsData"] = physics
     return normalized
@@ -216,9 +368,7 @@ def parse_custom_value(raw_value: str) -> Any:
 
 def parse_field_value(raw_value: Any, kind: str) -> Any:
     if kind == "bool":
-        if isinstance(raw_value, str):
-            return raw_value.strip().lower() in {"1", "true", "yes", "on"}
-        return bool(raw_value)
+        return safe_bool(raw_value)
     if kind == "tags":
         return [tag.strip() for tag in str(raw_value).split(",") if tag.strip()]
     if kind == "float":
@@ -408,6 +558,8 @@ def html_editor_page() -> str:
       font-weight: 700;
       padding: 8px;
       white-space: nowrap;
+      cursor: pointer;
+      user-select: none;
     }}
     .workbook-table th:first-child, .workbook-table td:first-child {{
       position: sticky;
@@ -615,6 +767,8 @@ def html_editor_page() -> str:
     let workbookRows = [];
     let dirtyWorkbookRows = new Set();
     let activeView = "workbook";
+    let workbookSortKey = "label";
+    let workbookSortDesc = false;
 
     const statusEl = document.getElementById("status");
     const runListEl = document.getElementById("runList");
@@ -660,6 +814,13 @@ def html_editor_page() -> str:
       if (value === null) return "null";
       if (typeof value === "object") return JSON.stringify(value);
       return String(value);
+    }}
+
+    function safeBoolValue(value) {{
+      if (typeof value === "boolean") return value;
+      if (typeof value === "number") return value !== 0;
+      if (typeof value === "string") return ["1", "true", "yes", "y", "on", "star", "starred"].includes(value.trim().toLowerCase());
+      return false;
     }}
 
     function flattenMetadata(value, prefix = "") {{
@@ -716,15 +877,63 @@ def html_editor_page() -> str:
       const tr = document.createElement("tr");
       const runTh = document.createElement("th");
       runTh.textContent = "Run";
+      runTh.dataset.sortKind = "run";
+      runTh.dataset.sortKey = "label";
+      runTh.addEventListener("click", () => setWorkbookSort("label"));
       tr.appendChild(runTh);
       FIELD_SPECS.forEach(spec => {{
         const th = document.createElement("th");
-        th.textContent = spec.label;
+        const arrow = workbookSortKey === spec.path ? (workbookSortDesc ? " v" : " ^") : "";
+        th.textContent = spec.label + arrow;
         th.title = spec.path;
+        th.dataset.sortKind = "field";
+        th.dataset.sortKey = spec.path;
+        th.addEventListener("click", () => setWorkbookSort(spec.path));
         tr.appendChild(th);
       }});
+      if (workbookSortKey === "label") runTh.textContent = "Run" + (workbookSortDesc ? " v" : " ^");
       workbookHeadEl.innerHTML = "";
       workbookHeadEl.appendChild(tr);
+    }}
+
+    function setWorkbookSort(key) {{
+      if (workbookSortKey === key) workbookSortDesc = !workbookSortDesc;
+      else {{
+        workbookSortKey = key;
+        workbookSortDesc = false;
+      }}
+      renderWorkbookHeader();
+      renderWorkbook();
+    }}
+
+    function workbookSortValue(row, key) {{
+      if (key === "label") return row.label || "";
+      if (key === "path") return row.path || "";
+      const value = row.fields ? row.fields[key] : "";
+      if (value === undefined || value === null || value === "") return "";
+      if (typeof value === "boolean") return value ? 1 : 0;
+      const number = Number(value);
+      if (Number.isFinite(number) && String(value).trim() !== "") return number;
+      return String(value).toLowerCase();
+    }}
+
+    function compareWorkbookRows(a, b) {{
+      let av = workbookSortValue(a, workbookSortKey);
+      let bv = workbookSortValue(b, workbookSortKey);
+      const aEmpty = av === "";
+      const bEmpty = bv === "";
+      if (aEmpty && !bEmpty) return 1;
+      if (!aEmpty && bEmpty) return -1;
+      if (typeof av === "number" && typeof bv === "number") {{
+        if (av < bv) return workbookSortDesc ? 1 : -1;
+        if (av > bv) return workbookSortDesc ? -1 : 1;
+        return 0;
+      }}
+      av = String(av);
+      bv = String(bv);
+      if (av < bv) return workbookSortDesc ? 1 : -1;
+      if (av > bv) return workbookSortDesc ? -1 : 1;
+      return 0;
     }}
 
     function workbookSearchBlob(row) {{
@@ -742,7 +951,9 @@ def html_editor_page() -> str:
 
     function renderWorkbook() {{
       const needle = workbookSearchEl.value.trim().toLowerCase();
-      const rows = workbookRows.filter(row => !needle || workbookSearchBlob(row).includes(needle));
+      const rows = workbookRows
+        .filter(row => !needle || workbookSearchBlob(row).includes(needle))
+        .sort(compareWorkbookRows);
       workbookCountEl.textContent = `${{rows.length}} of ${{workbookRows.length}} rows`;
       workbookBodyEl.innerHTML = "";
       rows.forEach(row => {{
@@ -764,15 +975,21 @@ def html_editor_page() -> str:
             wrapper.className = "cell-check";
             const input = document.createElement("input");
             input.type = "checkbox";
-            input.checked = row.fields[spec.path] === true || row.fields[spec.path] === "true";
-            input.addEventListener("change", () => markWorkbookDirty(row.path, td));
+            input.checked = safeBoolValue(row.fields[spec.path]);
+            input.addEventListener("change", () => {{
+              row.fields[spec.path] = input.checked;
+              markWorkbookDirty(row.path, td);
+            }});
             wrapper.appendChild(input);
             td.appendChild(wrapper);
           }} else {{
             const input = document.createElement("input");
             input.className = "cell-input";
             input.value = row.fields[spec.path] ?? "";
-            input.addEventListener("input", () => markWorkbookDirty(row.path, td));
+            input.addEventListener("input", () => {{
+              row.fields[spec.path] = input.value;
+              markWorkbookDirty(row.path, td);
+            }});
             td.appendChild(input);
           }}
           tr.appendChild(td);
@@ -790,7 +1007,7 @@ def html_editor_page() -> str:
           const input = document.createElement("input");
           input.type = "checkbox";
           input.dataset.path = spec.path;
-          input.checked = Boolean(pathGet(payload, spec.path));
+          input.checked = safeBoolValue(pathGet(payload, spec.path));
           const text = document.createElement("span");
           text.textContent = spec.label;
           label.append(input, text);
@@ -901,15 +1118,7 @@ def html_editor_page() -> str:
       dirtyWorkbookRows.forEach(path => {{
         const row = rowMap.get(path);
         if (!row) return;
-        const fields = {{}};
-        workbookBodyEl.querySelectorAll("td[data-path]").forEach(td => {{
-          if (td.dataset.path !== path) return;
-          const fieldPath = td.dataset.field;
-          const input = td.querySelector("input");
-          if (!fieldPath || !input) return;
-          fields[fieldPath] = input.type === "checkbox" ? input.checked : input.value;
-        }});
-        changes.push({{ path, fields }});
+        changes.push({{ path, fields: row.fields || {{}} }});
       }});
       return changes;
     }}
@@ -1040,7 +1249,7 @@ def launch_html_editor(root: Path, wait: bool = True) -> str:
         }
         for _label, field_path, kind in FIELD_SPECS:
             if kind == "bool":
-                fields[field_path] = bool(path_get(payload, field_path))
+                fields[field_path] = safe_bool(path_get(payload, field_path))
         return {**index_item(path), "fields": fields}
 
     def save_field_values(path: Path, fields: dict[str, object]) -> dict[str, Any]:
@@ -1263,7 +1472,7 @@ def launch_editor(root: Path) -> None:
                         payload = normalize_metadata(json.loads(path.read_text(encoding="utf-8")))
                         haystack += " " + " ".join(
                             safe_text(path_get(payload, key))
-                            for key in ("Sample", "ExperimentTag", "Description", "Filename", "Duration")
+                            for key in ("Sample", "ExperimentTag", "Description", "Duration")
                         ).lower()
                         haystack += " " + ", ".join(safe_tags(payload.get("Tags"))).lower()
                     except Exception:
@@ -1293,7 +1502,7 @@ def launch_editor(root: Path) -> None:
                 for _label, field_path, kind in field_specs:
                     value = path_get(payload, field_path)
                     if kind == "bool":
-                        self.bool_vars[field_path].set(bool(value))
+                        self.bool_vars[field_path].set(safe_bool(value))
                     else:
                         self.entry_vars[field_path].set(editor_value(value))
                 self.custom_path_var.set("")

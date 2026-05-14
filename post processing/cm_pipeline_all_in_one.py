@@ -31,7 +31,7 @@ BIN_MM = 0.1
 # Attenuator correction is supplied by WPF metadata and read directly by this pipeline.
 DETECTOR_AREA_SCALE = (0.24**2) / (32768**2)
 # Bump this when a code or assumption change should force existing runs to rebuild once.
-PIPELINE_CACHE_VERSION = "2026-05-07-wpf-attenuator-metadata-v1"
+PIPELINE_CACHE_VERSION = "2026-05-14-dark-noise-synthetic-factor-v1"
 # Conversion factor from distance in millimeters to time in picoseconds for this setup.
 MM_TO_PS = 6.6
 # Time per processed frame, in seconds:
@@ -43,6 +43,45 @@ RAW_STD_FRAME_INTEGRATION_S = FRAME_DT_S
 SATURATION_THRESHOLD_CH11 = 3e-7
 SHOT_NOISE_RESULT_V2_THRESHOLD = 10_000
 MAX_LINE_PLOT_POINTS = 50_000
+DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW = 0.01
+DARK_NOISE_TAG_POWER_ESTIMATE_MW = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW * 2.0
+DARK_NOISE_SYNTHETIC_WAVELENGTH_NM = 1550.0
+DARK_NOISE_SYNTHETIC_RESPONSIVITY_A_PER_W = 1.02
+DARK_NOISE_SYNTHETIC_REFERENCE_RESPONSIVITY_A_PER_W = 1.02
+DARK_NOISE_SYNTHETIC_DETECTOR_VOLTAGE_PER_MW = 10.0
+DARK_NOISE_SYNTHETIC_REP_RATE_HZ = 7.6e7
+DARK_NOISE_SYNTHETIC_RESPONSE_TIME_S = 3.5e-9
+DARK_NOISE_TAG_NAME = "Dark Noise"
+DARK_NOISE_TAG_KEY = "dark noise"
+
+
+def estimate_dark_noise_synthetic_conversion_factor_v2_rad2(
+    port_power_mw: float = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW,
+    wavelength_nm: float = DARK_NOISE_SYNTHETIC_WAVELENGTH_NM,
+    responsivity_a_per_w: float = DARK_NOISE_SYNTHETIC_RESPONSIVITY_A_PER_W,
+    reference_responsivity_a_per_w: float = DARK_NOISE_SYNTHETIC_REFERENCE_RESPONSIVITY_A_PER_W,
+    detector_voltage_per_mw: float = DARK_NOISE_SYNTHETIC_DETECTOR_VOLTAGE_PER_MW,
+    rep_rate_hz: float = DARK_NOISE_SYNTHETIC_REP_RATE_HZ,
+    response_time_s: float = DARK_NOISE_SYNTHETIC_RESPONSE_TIME_S,
+) -> float:
+    planck_constant = 6.62607015e-34
+    speed_of_light = 299792458.0
+    photon_energy_j = planck_constant * speed_of_light / (wavelength_nm * 1e-9)
+    port_power_w = port_power_mw * 1e-3
+    photons_per_pulse = port_power_w / (photon_energy_j * rep_rate_hz)
+    sensitivity = (
+        responsivity_a_per_w
+        * photon_energy_j
+        / response_time_s
+        * detector_voltage_per_mw
+        * 1e3
+        / reference_responsivity_a_per_w
+    )
+    conversion_per_port = 2.0 * photons_per_pulse * sensitivity
+    return conversion_per_port * conversion_per_port
+
+
+DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2 = estimate_dark_noise_synthetic_conversion_factor_v2_rad2()
 
 ENABLE_DROPPED_WINDOW_GATING = False
 ENABLE_SATURATION_CLEANUP = False
@@ -121,13 +160,12 @@ PAIRS = np.array(
     dtype=int,
 )
 
-# A pair is treated as "critical" when its metric exceeds a 3-sigma deviation from
-# the expected distribution. 3.0 was chosen as a conventional outlier cutoff: it is
-# strict enough to suppress most noise-driven excursions, while still surfacing
-# pair behavior that is statistically unusual and likely to reflect a real issue in
-# the measurement rather than normal frame-to-frame variation.
-# Cap the number of displayed critical pairs to keep the summary plots readable.
-CRITICAL_PAIR_MAX_COUNT = 8
+# Critical pairs are the channel pairs with the largest correlation-channel MSE.
+# The MSE for one correlation channel is its frame-to-frame variance around its
+# own time average. A pair's score is the average MSE of its two endpoint channels,
+# which favors pairs whose two measured correlation channels are jointly unstable.
+# The top 9 pairs are tracked in summary plots and the signal-emergence movie.
+CRITICAL_PAIR_MAX_COUNT = 9
 DATAFILES_DEFAULT_DIR = Path(r"C:\Quantum Squeezing\Quantum-Measurement-Software\DataFiles")
 
 
@@ -147,6 +185,9 @@ class Meta:
     scan_range: float = 0.0
     scan_min: float = 25.058
     scan_max: float = 25.058
+    scan_velocity_mm_s: float = math.nan
+    dark_noise_forced_by_tag: bool = False
+    synthetic_conversion_factor_applied: bool = False
 
 
 def pair_labels(pairs: np.ndarray) -> list[str]:
@@ -283,18 +324,122 @@ def metadata_float(value: object) -> float:
         return math.nan
 
 
-def apply_metadata_attenuator(run_folder: Path, meta: Meta) -> None:
+def metadata_payload(run_folder: Path) -> dict[str, object]:
     json_path = run_folder / "metadata.json"
     if not json_path.is_file():
+        return {}
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def metadata_tag_values(payload: dict[str, object]) -> list[str]:
+    raw_tags = payload.get("Tags")
+    if isinstance(raw_tags, list):
+        return [str(tag).strip().lower() for tag in raw_tags if str(tag).strip()]
+    if isinstance(raw_tags, str):
+        return [tag.strip().lower() for tag in re.split(r"[,;]", raw_tags) if tag.strip()]
+    return []
+
+
+def has_dark_noise_tag(run_folder: Path) -> bool:
+    tags = metadata_tag_values(metadata_payload(run_folder))
+    normalized_tags = {re.sub(r"[\s_-]+", " ", tag).strip() for tag in tags}
+    return DARK_NOISE_TAG_KEY in normalized_tags
+
+
+def apply_dark_noise_tag_power_estimate(run_folder: Path, meta: Meta) -> None:
+    if not has_dark_noise_tag(run_folder):
+        return
+    meta.p1_mw = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW
+    meta.p2_mw = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW
+    meta.conversion_factor = DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2
+    meta.dark_noise_forced_by_tag = True
+    meta.synthetic_conversion_factor_applied = True
+
+
+def nested_metadata_value(payload: dict[str, object], path: tuple[str, ...]) -> object:
+    current: object = payload
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def first_metadata_float(payload: dict[str, object], paths: list[tuple[str, ...]]) -> float:
+    for path in paths:
+        value = nested_metadata_value(payload, path)
+        result = metadata_float(value)
+        if np.isfinite(result):
+            return result
+    return math.nan
+
+
+def metadata_scan_velocity_mm_s(run_folder: Path) -> float:
+    payload = metadata_payload(run_folder)
+    return first_metadata_float(
+        payload,
+        [
+            ("PhysicsData", "ScanVelocity_mm_s"),
+            ("PhysicsData", "ScanRate_mm_s"),
+            ("PhysicsData", "ESPScanVelocity_mm_s"),
+            ("Configuration", "ScanVelocity_mm_s"),
+            ("Configuration", "ScanRate_mm_s"),
+            ("ScanVelocity_mm_s",),
+            ("ScanRate_mm_s",),
+            ("ESPScanVelocity_mm_s",),
+        ],
+    )
+
+
+def estimate_scan_velocity_mm_s(time_s: np.ndarray, position_mm: np.ndarray) -> float:
+    if time_s.size < 2 or position_mm.size < 2:
+        return math.nan
+
+    count = min(time_s.size, position_mm.size)
+    t = np.asarray(time_s[:count], dtype=float)
+    p = np.asarray(position_mm[:count], dtype=float)
+    mask = np.isfinite(t) & np.isfinite(p)
+    if np.count_nonzero(mask) < 2:
+        return math.nan
+
+    t = t[mask]
+    p = p[mask]
+    order = np.argsort(t)
+    t = t[order]
+    p = p[order]
+    unique_t, unique_indices = np.unique(t, return_index=True)
+    if unique_t.size < 2:
+        return math.nan
+    p = p[unique_indices]
+
+    duration_s = float(unique_t[-1] - unique_t[0])
+    if duration_s <= 0:
+        return math.nan
+
+    deltas = np.abs(np.diff(p))
+    span = float(np.max(p) - np.min(p))
+    if span <= 0:
+        return 0.0
+
+    jitter_floor = max(1e-6, span * 1e-4)
+    path_length = float(np.sum(deltas[deltas > jitter_floor]))
+    if path_length <= 0:
+        path_length = span
+    return path_length / duration_s
+
+
+def apply_metadata_attenuator(run_folder: Path, meta: Meta) -> None:
+    payload = metadata_payload(run_folder)
+    if not payload:
         meta.power_detector_attenuator_applied = False
         meta.power_detector_attenuator_total_db = 0.0
         meta.power_detector_attenuator_correction_factor = 1.0
         return
 
-    try:
-        payload = json.loads(json_path.read_text(encoding="utf-8"))
-    except Exception:
-        payload = {}
     physics = payload.get("PhysicsData") if isinstance(payload, dict) else {}
     physics = physics if isinstance(physics, dict) else {}
 
@@ -330,11 +475,13 @@ def read_sensitivity_log(run_folder: Path) -> Meta:
 
 
 def scale_to_urad2(values: np.ndarray, conversion_factor: float) -> np.ndarray:
-    cf = 1e4 if not np.isfinite(conversion_factor) else conversion_factor
+    cf = DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2 if not np.isfinite(conversion_factor) else conversion_factor
     return (values / cf) * 1e12
 
 
 def is_dark_noise_run(meta: Meta) -> bool:
+    if meta.dark_noise_forced_by_tag:
+        return True
     finite_powers = [value for value in (meta.p1_mw, meta.p2_mw) if np.isfinite(value)]
     total_power_mw = float(np.sum(finite_powers)) if finite_powers else 0.0
     invalid_conversion = (not np.isfinite(meta.conversion_factor)) or meta.conversion_factor <= 0
@@ -343,6 +490,12 @@ def is_dark_noise_run(meta: Meta) -> bool:
 
 
 def dark_noise_reason(meta: Meta) -> str | None:
+    if meta.dark_noise_forced_by_tag:
+        return (
+            f"metadata tag {DARK_NOISE_TAG_NAME} uses {DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW:g} mW per detector port "
+            f"at {DARK_NOISE_SYNTHETIC_WAVELENGTH_NM:g} nm and synthetic conversion factor "
+            f"{DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2:.6g} V^2/rad^2"
+        )
     powers = (meta.p1_mw, meta.p2_mw)
     if any(not np.isfinite(value) for value in powers):
         return "port power undefined"
@@ -365,6 +518,10 @@ def scale_for_display(values: np.ndarray, conversion_factor: float, display_in_v
     return scale_to_urad2(values, conversion_factor)
 
 
+def display_in_v2_for_meta(meta: Meta) -> bool:
+    return is_dark_noise_run(meta) and not meta.synthetic_conversion_factor_applied
+
+
 def amplitude_unit_label(display_in_v2: bool) -> str:
     return "V^2" if display_in_v2 else r"$\mu rad^2$"
 
@@ -382,6 +539,17 @@ def delta_axis_label(display_in_v2: bool) -> str:
     return f"$\\Delta$ amplitude ({amplitude_unit_label(display_in_v2)})"
 
 
+def dark_noise_title_note(meta: Meta) -> str | None:
+    if not meta.synthetic_conversion_factor_applied:
+        return None
+    return (
+        f"{DARK_NOISE_TAG_NAME} tag: synthetic conversion factor "
+        f"{DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2:.6g} V^2/rad^2 applied from "
+        f"{DARK_NOISE_SYNTHETIC_WAVELENGTH_NM:g} nm, {DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW:g} mW per detector port; "
+        "results shown in artificial urad^2"
+    )
+
+
 def use_v2_for_shot_noise(meta: Meta) -> bool:
     return bool(
         np.isfinite(meta.shot_noise_result) and meta.shot_noise_result > SHOT_NOISE_RESULT_V2_THRESHOLD
@@ -393,30 +561,36 @@ def pair_diagonal_offset(pair: np.ndarray) -> int:
 
 
 def critical_pair_indices(
+    cm: np.ndarray,
     amps: np.ndarray,
     pairs: np.ndarray,
     max_count: int = CRITICAL_PAIR_MAX_COUNT,
 ) -> tuple[list[int], list[dict[str, float | int]]]:
-    if amps.size == 0 or pairs.size == 0:
+    if cm.size == 0 or pairs.size == 0:
         return [], []
 
     offsets = np.asarray([pair_diagonal_offset(pair) for pair in pairs], dtype=int)
-    mean_corr = np.nanmean(amps, axis=0)
-    global_mean = float(np.nanmean(mean_corr))
-    scores = np.abs(mean_corr - global_mean)
-    peak_amplitudes = np.nanmax(np.abs(amps), axis=0)
+    channel_mse = np.nanmean((cm - np.nanmean(cm, axis=0, keepdims=True)) ** 2, axis=0)
+    pair_i1 = np.asarray([idx_lin(pair[0], pair[1]) for pair in pairs], dtype=int)
+    pair_i2 = np.asarray([idx_lin(pair[2], pair[3]) for pair in pairs], dtype=int)
+    endpoint_mse_1 = channel_mse[pair_i1]
+    endpoint_mse_2 = channel_mse[pair_i2]
+    scores = np.nanmean(np.column_stack([endpoint_mse_1, endpoint_mse_2]), axis=1)
+    mean_pair_amplitudes = np.nanmean(amps, axis=0) if amps.size else np.full(len(pairs), np.nan)
+    peak_amplitudes = np.nanmax(np.abs(amps), axis=0) if amps.size else np.full(len(pairs), np.nan)
 
     ranked = np.argsort(np.nan_to_num(scores, nan=-np.inf))[::-1]
-    keep_indices = [int(idx) for idx in ranked if np.isfinite(scores[idx]) and np.isfinite(peak_amplitudes[idx])]
+    keep_indices = [int(idx) for idx in ranked if np.isfinite(scores[idx])]
     keep_indices = keep_indices[: min(max_count, len(keep_indices))]
 
     details = [
         {
             "pair_index": int(idx),
             "diagonal_offset": int(offsets[idx]),
-            "critical_score": float(scores[idx]),
-            "mean_correlation": float(mean_corr[idx]),
-            "global_mean_correlation": global_mean,
+            "mse_corr_pair_score": float(scores[idx]),
+            "mse_corr_channel_1": float(endpoint_mse_1[idx]),
+            "mse_corr_channel_2": float(endpoint_mse_2[idx]),
+            "mean_pair_amplitude": float(mean_pair_amplitudes[idx]),
             "peak_abs_amplitude": float(peak_amplitudes[idx]),
         }
         for idx in keep_indices
@@ -436,9 +610,10 @@ def write_critical_pairs_summary(
                 "pair_index",
                 "label",
                 "diagonal_offset",
-                "critical_score",
-                "mean_correlation",
-                "global_mean_correlation",
+                "mse_corr_pair_score",
+                "mse_corr_channel_1",
+                "mse_corr_channel_2",
+                "mean_pair_amplitude",
                 "peak_abs_amplitude",
             ]
         )
@@ -449,9 +624,10 @@ def write_critical_pairs_summary(
                     pair_index,
                     pair_labels_list[pair_index],
                     detail["diagonal_offset"],
-                    f"{float(detail['critical_score']):.6f}",
-                    f"{float(detail['mean_correlation']):.6f}",
-                    f"{float(detail['global_mean_correlation']):.6f}",
+                    f"{float(detail['mse_corr_pair_score']):.6e}",
+                    f"{float(detail['mse_corr_channel_1']):.6e}",
+                    f"{float(detail['mse_corr_channel_2']):.6e}",
+                    f"{float(detail['mean_pair_amplitude']):.6f}",
                     f"{float(detail['peak_abs_amplitude']):.6f}",
                 ]
             )
@@ -1069,9 +1245,15 @@ def build_bin_cumsums_and_counts(
 
 
 def save_all_pairs_plot(
-    run_folder: Path, ts: np.ndarray, amps: np.ndarray, pair_labels_list: list[str], meta: Meta, kmin: int
+    run_folder: Path,
+    ts: np.ndarray,
+    amps: np.ndarray,
+    pair_labels_list: list[str],
+    meta: Meta,
+    kmin: int,
+    total_frames: int,
 ) -> None:
-    display_in_v2 = is_dark_noise_run(meta)
+    display_in_v2 = display_in_v2_for_meta(meta)
     fig, ax = plt.subplots(figsize=(16, 9))
     colors = plt.cm.turbo(np.linspace(0, 1, amps.shape[1]))
     for idx, label in enumerate(pair_labels_list):
@@ -1079,11 +1261,15 @@ def save_all_pairs_plot(
 
     ax.set_xlabel("Delay (ps)")
     ax.set_ylabel(amplitude_axis_label(display_in_v2))
-    shot_noise_unit = "V^2" if use_v2_for_shot_noise(meta) else r"$\mu rad^2$"
+    shot_noise_unit = "V^2" if display_in_v2 else r"$\mu rad^2$"
     title_lines = [
-        f"ALL Pairs Result at k={kmin}",
+        f"ALL Pairs Result | Integration: {kmin} Frames ({kmin * FRAME_DT_S:.2f}s)",
+        f"Total processed: {total_frames} Frames ({total_frames * FRAME_DT_S:.2f}s)",
         f"Power: {np.nansum([meta.p1_mw, meta.p2_mw]):.2f}mW | Range: {meta.scan_range:.1f}mm | ShotNoise: {meta.shot_noise_result:.1f} {shot_noise_unit}",
     ]
+    note = dark_noise_title_note(meta)
+    if note:
+        title_lines.append(note)
     ax.set_title("\n".join(title_lines))
     if amps.shape[1] <= 20:
         ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
@@ -1107,8 +1293,10 @@ def save_selected_pairs_plot(
     amps: np.ndarray,
     pair_labels_list: list[str],
     keep_indices: list[int],
-    acquisition_time_s: float,
+    integration_frames: int,
+    total_frames: int,
     display_in_v2: bool,
+    title_note: str | None = None,
 ) -> None:
     if not keep_indices:
         keep_indices = list(range(min(CRITICAL_PAIR_MAX_COUNT, len(pair_labels_list))))
@@ -1119,7 +1307,14 @@ def save_selected_pairs_plot(
 
     ax.set_xlabel("Delay (ps)")
     ax.set_ylabel(amplitude_axis_label(display_in_v2))
-    ax.set_title(f"Critical Pairs Summary | Acquisition: {acquisition_time_s:.2f} s")
+    title_lines = [
+        "Critical Pairs Summary",
+        f"Integration: {integration_frames} Frames ({integration_frames * FRAME_DT_S:.2f}s) | "
+        f"Total processed: {total_frames} Frames ({total_frames * FRAME_DT_S:.2f}s)",
+    ]
+    if title_note:
+        title_lines.append(title_note)
+    ax.set_title("\n".join(title_lines))
     ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
     fig.tight_layout()
     save_figure_with_provenance(fig, run_folder / "final_clean_result.png", run_folder)
@@ -1329,6 +1524,7 @@ def save_variation_and_fft(
     labels: list[str],
     keep_indices: list[int],
     display_in_v2: bool,
+    title_note: str | None = None,
 ) -> None:
     if counts.size == 0:
         return
@@ -1385,6 +1581,7 @@ def save_signal_emergence_movie(
     labels: list[str],
     keep_indices: list[int],
     display_in_v2: bool,
+    title_note: str | None = None,
 ) -> None:
     if imageio is None or counts.size == 0:
         warnings.warn("imageio is not installed, so signal_emergence.mp4 was skipped.")
@@ -1412,6 +1609,16 @@ def save_signal_emergence_movie(
 
     movie_path = run_folder / "signal_emergence.mp4"
     fig, ax = plt.subplots(figsize=(12, 7))
+    fig.text(
+        0.005,
+        0.006,
+        figure_provenance_text(run_folder),
+        ha="left",
+        va="bottom",
+        fontsize=6,
+        color="#555555",
+        wrap=True,
+    )
     line_handles = []
     for idx in keep_indices:
         (line,) = ax.plot([], [], "o-", linewidth=1.5, markersize=4, label=labels[idx])
@@ -1450,8 +1657,11 @@ def save_signal_emergence_movie(
                         y_max += pad
                     ax.set_ylim(y_min, y_max)
 
-            ax.set_title(f"Integration: {k} Frames ({k * FRAME_DT_S:.2f}s)")
-            fig.tight_layout()
+            title = f"Integration: {k} Frames ({k * FRAME_DT_S:.2f}s)"
+            if title_note:
+                title = f"{title}\n{title_note}"
+            ax.set_title(title)
+            fig.tight_layout(rect=(0, 0.055, 1, 1))
             fig.canvas.draw()
             frame = np.asarray(fig.canvas.buffer_rgba())[:, :, :3]
             writer.append_data(frame)
@@ -1538,6 +1748,25 @@ def update_metadata_json(run_folder: Path, meta: Meta) -> None:
     physics = payload.setdefault("PhysicsData", {})
     physics["Power_mW_1"] = None if not np.isfinite(meta.p1_mw) else meta.p1_mw
     physics["Power_mW_2"] = None if not np.isfinite(meta.p2_mw) else meta.p2_mw
+    if meta.dark_noise_forced_by_tag:
+        physics["OnSamplePower_mW"] = DARK_NOISE_TAG_POWER_ESTIMATE_MW
+        physics["DarkNoiseTagPowerEstimate_mW"] = DARK_NOISE_TAG_POWER_ESTIMATE_MW
+        physics["DarkNoiseTagPortPowerEstimate_mW"] = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW
+        physics["DarkNoiseSyntheticWavelength_nm"] = DARK_NOISE_SYNTHETIC_WAVELENGTH_NM
+        physics["DarkNoiseSyntheticDetectorResponsivity_A_per_W"] = DARK_NOISE_SYNTHETIC_RESPONSIVITY_A_PER_W
+        physics["DarkNoiseSyntheticRepRate_Hz"] = DARK_NOISE_SYNTHETIC_REP_RATE_HZ
+        physics["DarkNoiseSyntheticResponseTime_s"] = DARK_NOISE_SYNTHETIC_RESPONSE_TIME_S
+        physics["SyntheticConversionFactorApplied"] = True
+        physics["SyntheticConversionFactor_V2_rad2"] = DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2
+        physics["SyntheticConversionFactorNote"] = dark_noise_title_note(meta)
+    else:
+        physics.pop("SyntheticConversionFactorApplied", None)
+        physics.pop("SyntheticConversionFactor_V2_rad2", None)
+        physics.pop("SyntheticConversionFactorNote", None)
+        physics.pop("DarkNoiseSyntheticWavelength_nm", None)
+        physics.pop("DarkNoiseSyntheticDetectorResponsivity_A_per_W", None)
+        physics.pop("DarkNoiseSyntheticRepRate_Hz", None)
+        physics.pop("DarkNoiseSyntheticResponseTime_s", None)
     physics["Sensitivity_V_photon"] = None if not np.isfinite(meta.sensitivity) else meta.sensitivity
     physics["ShotNoise1_V"] = None if not np.isfinite(meta.shot_noise1_v) else meta.shot_noise1_v
     physics["ShotNoise2_V"] = None if not np.isfinite(meta.shot_noise2_v) else meta.shot_noise2_v
@@ -1546,19 +1775,24 @@ def update_metadata_json(run_folder: Path, meta: Meta) -> None:
     dark_reason = dark_noise_reason(meta)
     is_dark = dark_reason is not None or is_dark_noise_run(meta)
     physics["IsDarkNoiseRun"] = is_dark
-    physics["DarkNoiseLabel"] = "Dark noise" if is_dark else "Signal"
+    physics["DarkNoiseLabel"] = DARK_NOISE_TAG_NAME if is_dark else "Signal"
     physics["DarkNoiseReason"] = dark_reason
-    physics["DisplayAmplitudeUnit"] = "V^2" if is_dark else "urad^2"
+    display_in_v2 = is_dark and not meta.synthetic_conversion_factor_applied
+    physics["DisplayAmplitudeUnit"] = "V^2" if display_in_v2 else "urad^2"
     physics.pop("ShotNoiseResult_urad2_rtHz", None)
     physics.pop("ShotNoiseResult_V2_rtHz", None)
     shot_noise_result = None if not np.isfinite(meta.shot_noise_result) else meta.shot_noise_result
-    if use_v2_for_shot_noise(meta):
+    if display_in_v2:
         physics["ShotNoiseResult_V2_rtHz"] = shot_noise_result
     else:
-        physics["ShotNoiseResult_urad2_rtHz"] = shot_noise_result
+        if meta.synthetic_conversion_factor_applied and shot_noise_result is not None:
+            physics["ShotNoiseResult_urad2_rtHz"] = shot_noise_result / meta.conversion_factor * 1e12
+        else:
+            physics["ShotNoiseResult_urad2_rtHz"] = shot_noise_result
     physics["ScanRange_mm"] = meta.scan_range
     physics["ScanMin_mm"] = meta.scan_min
     physics["ScanMax_mm"] = meta.scan_max
+    physics["ScanVelocity_mm_s"] = None if not np.isfinite(meta.scan_velocity_mm_s) else meta.scan_velocity_mm_s
 
     post_processing = payload.setdefault("PostProcessing", {})
     post_processing["Pipeline"] = "cm_pipeline_all_in_one.py"
@@ -1578,6 +1812,11 @@ def run_pipeline(
     style_matplotlib()
     run_folder = Path(target_folder)
 
+    def report_progress(percent: int, message: str) -> None:
+        safe_percent = max(0, min(100, int(percent)))
+        print(f"PROGRESS {safe_percent} {message}", flush=True)
+
+    report_progress(0, "Preparing run")
     cm_path = run_folder / "cm.bin"
     profile_path = run_folder / "profile.txt"
     pos_path = find_first(run_folder, ["delay_stage_positions.log", "delay_stage_positions.csv"])
@@ -1587,13 +1826,16 @@ def run_pipeline(
         raise FileNotFoundError("cm.bin not found.")
 
     if not force and review_first_n <= 0 and should_skip_run(run_folder, pos_path):
+        report_progress(100, "Skipped current run because outputs are current")
         print(f"Skipped current run: {run_folder}", flush=True)
         update_datafiles_browser_index(run_folder)
         return
 
+    report_progress(5, "Reading cm.bin")
     raw_cm_all = read_cm64(cm_path)
     n_frames_all = raw_cm_all.shape[0]
     t_seconds_all, t_absolute_seconds_all = read_times_from_profile(profile_path, n_frames_all)
+    report_progress(12, "Analyzing raw frame statistics")
     save_raw_std_analysis(run_folder, raw_cm_all, t_seconds_all)
 
     raw_cm = raw_cm_all
@@ -1609,10 +1851,12 @@ def run_pipeline(
 
     meta = read_sensitivity_log(run_folder)
     apply_metadata_attenuator(run_folder, meta)
+    apply_dark_noise_tag_power_estimate(run_folder, meta)
+    meta.scan_velocity_mm_s = metadata_scan_velocity_mm_s(run_folder)
     cm_scale_factor = DETECTOR_AREA_SCALE * meta.power_detector_attenuator_correction_factor
     cm = raw_cm * cm_scale_factor
     conversion_factor = meta.conversion_factor
-    display_in_v2 = is_dark_noise_run(meta)
+    display_in_v2 = display_in_v2_for_meta(meta)
 
     if pos_path is None:
         pos_on_cm = np.full(n_frames, 25.058, dtype=float)
@@ -1637,7 +1881,10 @@ def run_pipeline(
         meta.scan_range = float(np.max(pos_on_cm) - np.min(pos_on_cm))
         meta.scan_min = float(np.min(pos_on_cm))
         meta.scan_max = float(np.max(pos_on_cm))
+        if not np.isfinite(meta.scan_velocity_mm_s):
+            meta.scan_velocity_mm_s = estimate_scan_velocity_mm_s(t_seconds, pos_on_cm)
 
+    report_progress(22, "Preparing frame review and cleanup")
     if review_first_n > 0:
         review_dir = export_frame_review(
             run_folder,
@@ -1662,6 +1909,7 @@ def run_pipeline(
 
     save_histogram(run_folder, cm[:, 0])
 
+    report_progress(35, "Applying frame gates")
     if ENABLE_DROPPED_WINDOW_GATING:
         dropped_mask = dropped_window_mask(t_seconds, t_datetimes, run_folder / "dropped_window.log")
         if np.any(dropped_mask):
@@ -1712,6 +1960,7 @@ def run_pipeline(
 
     pairs = PAIRS.copy()
     labels = pair_labels(pairs)
+    report_progress(48, "Selecting usable channel pairs")
     if ENABLE_CHANNEL_HEALTH_GATING:
         channel_kurt = kurtosis_per_channel(cm)
         bad_channels = {idx for idx, value in enumerate(channel_kurt) if np.isfinite(value) and value > 5.0}
@@ -1734,6 +1983,7 @@ def run_pipeline(
     valid_indices = np.where(keep_bins)[0]
     save_frames_per_position(run_folder, bin_vals, counts, min_count)
 
+    report_progress(60, "Building delay-bin averages")
     pair_i1 = np.array([idx_lin(pair[0], pair[1]) for pair in pairs], dtype=int)
     pair_i2 = np.array([idx_lin(pair[2], pair[3]) for pair in pairs], dtype=int)
     pair_diffs = cm[:, pair_i1] - cm[:, pair_i2]
@@ -1760,7 +2010,7 @@ def run_pipeline(
     order = np.argsort(ts)
     ts = ts[order]
     amps = amps[order]
-    critical_keep_indices, critical_details = critical_pair_indices(amps, pairs)
+    critical_keep_indices, critical_details = critical_pair_indices(cm, amps, pairs)
     if not critical_keep_indices:
         critical_keep_indices = list(range(min(CRITICAL_PAIR_MAX_COUNT, len(labels))))
     write_critical_pairs_summary(run_folder, critical_details, labels)
@@ -1772,9 +2022,21 @@ def run_pipeline(
         for delay, row in zip(ts, amps, strict=False):
             writer.writerow([f"{delay:.6f}", *row])
 
-    save_all_pairs_plot(run_folder, ts, amps, labels, meta, kmin)
-    acquisition_time_s = float(t_seconds[-1] - t_seconds[0]) if t_seconds.size > 1 else 0.0
-    save_selected_pairs_plot(run_folder, ts, amps, labels, critical_keep_indices, acquisition_time_s, display_in_v2)
+    report_progress(72, "Saving final plots")
+    total_processed_frames = int(cm.shape[0])
+    title_note = dark_noise_title_note(meta)
+    save_all_pairs_plot(run_folder, ts, amps, labels, meta, kmin, total_processed_frames)
+    save_selected_pairs_plot(
+        run_folder,
+        ts,
+        amps,
+        labels,
+        critical_keep_indices,
+        kmin,
+        total_processed_frames,
+        display_in_v2,
+        title_note,
+    )
     save_loglog_eval(
         run_folder,
         np.maximum(t_seconds - t_seconds[0], FRAME_DT_S),
@@ -1790,10 +2052,14 @@ def run_pipeline(
     save_loglog_eval_pairs_runmean(run_folder, cm, pairs, labels, conversion_factor, display_in_v2)
     save_grouped_loglog_convergence(run_folder, bin_vals, bin_cumsums, labels, len(labels), display_in_v2)
     if ENABLE_FFT_ANALYSIS:
+        report_progress(86, "Saving FFT plots")
         save_variation_and_fft(run_folder, ts, counts, bin_cumsums, labels, critical_keep_indices, display_in_v2)
-    save_signal_emergence_movie(run_folder, ts, counts, bin_cumsums, labels, critical_keep_indices, display_in_v2)
+    report_progress(92, "Saving MP4")
+    save_signal_emergence_movie(run_folder, ts, counts, bin_cumsums, labels, critical_keep_indices, display_in_v2, title_note)
+    report_progress(98, "Updating metadata and index")
     update_metadata_json(run_folder, meta)
     update_datafiles_browser_index(run_folder)
+    report_progress(100, "Finished run")
 
 
 def update_datafiles_browser_index(run_folder: Path) -> None:

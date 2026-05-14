@@ -76,6 +76,7 @@ tCM_s = seconds(tCM - tCM(1));
 
 % --- Extract Physics Metadata ---
 meta = readSensitivityLog(runFolder);
+meta = applyDarkNoiseTagPowerEstimate(runFolder, meta);
 if isnan(meta.ConversionFactor)
     warning('Conversion Factor not found. Using default 1e4.');
     CF_max = 1e4;
@@ -548,7 +549,7 @@ for i = 1:length(frame_steps)
         set(hLines(j), 'YData', sorted_amps);
     end
     
-    title(ax, sprintf('Integration: %d Frames (%.2fs)', k, k * frame_dt_s));
+    title(ax, sprintf('Integration: %d Frames (%.2fs)\n%s', k, k * frame_dt_s, runFolder), 'Interpreter', 'none');
     
     % Capture and write
     drawnow limitrate;
@@ -680,6 +681,13 @@ else, fprintf('metadata.json not found. Creating new one.\n'); end
 
 json_struct.PhysicsData.Power_mW_1 = meta.P1_mW;
 json_struct.PhysicsData.Power_mW_2 = meta.P2_mW;
+if isfield(meta, 'DarkNoiseForcedByTag') && meta.DarkNoiseForcedByTag
+    json_struct.PhysicsData.OnSamplePower_mW = 0.05;
+    json_struct.PhysicsData.DarkNoiseTagPowerEstimate_mW = 0.05;
+    json_struct.PhysicsData.IsDarkNoiseRun = true;
+    json_struct.PhysicsData.DarkNoiseLabel = 'Dark noise';
+    json_struct.PhysicsData.DarkNoiseReason = 'metadata tag dark noise uses 50 uW power estimate';
+end
 json_struct.PhysicsData.Sensitivity_V_photon = meta.Sensitivity;
 json_struct.PhysicsData.ShotNoise1_V = meta.ShotNoise1_V;
 json_struct.PhysicsData.ShotNoise2_V = meta.ShotNoise2_V;
@@ -710,6 +718,7 @@ function meta = readSensitivityLog(runFolder)
     meta.P1_mW = NaN; meta.P2_mW = NaN;
     meta.Sensitivity = NaN; meta.ShotNoise1_V = NaN; meta.ShotNoise2_V = NaN;
     meta.SignalLevel = NaN; meta.ConversionFactor = NaN; meta.ShotNoiseResult = NaN;
+    meta.DarkNoiseForcedByTag = false;
     
     f = fullfile(runFolder, 'sensitivity.log');
     if ~isfile(f), return; end
@@ -725,6 +734,36 @@ function meta = readSensitivityLog(runFolder)
     meta.SignalLevel = extractVal('Signal Level\s*=\s*([\d\.E\+\-]+)');
     meta.ConversionFactor = extractVal('Conversion Factor\s*=\s*([\d\.E\+\-]+)');
     meta.ShotNoiseResult = extractVal('Shot Noise Result\s*=\s*([\d\.E\+\-]+)');
+end
+
+function meta = applyDarkNoiseTagPowerEstimate(runFolder, meta)
+    jsonFile = fullfile(runFolder, 'metadata.json');
+    if ~isfile(jsonFile), return; end
+    try
+        payload = jsondecode(fileread(jsonFile));
+    catch
+        return;
+    end
+    if ~isfield(payload, 'Tags'), return; end
+    tags = payload.Tags;
+    hasDarkNoise = false;
+    if iscell(tags)
+        for i = 1:numel(tags)
+            tag = lower(strtrim(regexprep(string(tags{i}), '[_\-\s]+', ' ')));
+            hasDarkNoise = hasDarkNoise || strcmp(tag, "dark noise");
+        end
+    elseif isstring(tags) || ischar(tags)
+        splitTags = regexp(char(tags), '[,;]', 'split');
+        for i = 1:numel(splitTags)
+            tag = lower(strtrim(regexprep(string(splitTags{i}), '[_\-\s]+', ' ')));
+            hasDarkNoise = hasDarkNoise || strcmp(tag, "dark noise");
+        end
+    end
+    if hasDarkNoise
+        meta.P1_mW = 0.025;
+        meta.P2_mW = 0.025;
+        meta.DarkNoiseForcedByTag = true;
+    end
 end
 
 function cm = readCM64(f), fid=fopen(f,'rb'); r=fread(fid,'double'); fclose(fid); cm=reshape(r,64,[]).'; end
