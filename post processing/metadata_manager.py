@@ -92,6 +92,24 @@ def dark_noise_synthetic_note(factor: float | None = None) -> str:
     )
 
 
+def dark_noise_reference_note(factor: float, reference_name: str) -> str:
+    return (
+        f"{DARK_NOISE_TAG_NAME} tag: using nearest non-Dark Noise conversion factor "
+        f"{factor:.6g} V^2/rad^2 from {reference_name}; results shown in artificial urad^2"
+    )
+
+
+def existing_dark_noise_conversion_factor(physics: dict[str, Any]) -> tuple[float, str, str]:
+    reference_name = safe_text(physics.get("DarkNoiseReferenceRunName"))
+    source = safe_text(physics.get("SyntheticConversionFactorSource")).lower()
+    reference_factor = safe_float_or_none(physics.get("DarkNoiseReferenceConversionFactor_V2_rad2"))
+    if reference_factor is None:
+        reference_factor = safe_float_or_none(physics.get("SyntheticConversionFactor_V2_rad2"))
+    if reference_factor is not None and reference_factor > 0 and (reference_name or "nearest" in source):
+        return reference_factor, "nearest non-Dark Noise measurement", reference_name
+    return DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2, "fallback synthetic estimate", ""
+
+
 def safe_text(value: Any, default: str = "") -> str:
     if value is None:
         return default
@@ -192,26 +210,45 @@ def normalize_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     normalized["Duration"] = safe_text(payload.get("Duration"))
 
     if has_dark_noise_tag(normalized["Tags"]):
+        factor, factor_source, reference_name = existing_dark_noise_conversion_factor(physics)
         physics["Power_mW_1"] = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW
         physics["Power_mW_2"] = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW
         physics["OnSamplePower_mW"] = DARK_NOISE_TAG_POWER_ESTIMATE_MW
         physics["DarkNoiseTagPowerEstimate_mW"] = DARK_NOISE_TAG_POWER_ESTIMATE_MW
         physics["DarkNoiseTagPortPowerEstimate_mW"] = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW
-        physics["DarkNoiseSyntheticWavelength_nm"] = DARK_NOISE_SYNTHETIC_WAVELENGTH_NM
-        physics["DarkNoiseSyntheticDetectorResponsivity_A_per_W"] = DARK_NOISE_SYNTHETIC_RESPONSIVITY_A_PER_W
-        physics["DarkNoiseSyntheticRepRate_Hz"] = DARK_NOISE_SYNTHETIC_REP_RATE_HZ
-        physics["DarkNoiseSyntheticResponseTime_s"] = DARK_NOISE_SYNTHETIC_RESPONSE_TIME_S
         physics["IsDarkNoiseRun"] = True
         physics["DarkNoiseLabel"] = DARK_NOISE_TAG_NAME
         physics["DarkNoiseReason"] = (
-            f"metadata tag {DARK_NOISE_TAG_NAME} uses {DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW:g} mW per detector port "
-            f"at {DARK_NOISE_SYNTHETIC_WAVELENGTH_NM:g} nm and synthetic conversion factor "
-            f"{DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2:.6g} V^2/rad^2"
+            f"metadata tag {DARK_NOISE_TAG_NAME} uses nearest non-Dark Noise conversion factor "
+            f"{factor:.6g} V^2/rad^2 from {reference_name}"
+            if reference_name
+            else (
+                f"metadata tag {DARK_NOISE_TAG_NAME} uses {DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW:g} mW per detector port "
+                f"at {DARK_NOISE_SYNTHETIC_WAVELENGTH_NM:g} nm and fallback synthetic conversion factor "
+                f"{factor:.6g} V^2/rad^2"
+            )
         )
         physics["DisplayAmplitudeUnit"] = "urad^2"
         physics["SyntheticConversionFactorApplied"] = True
-        physics["SyntheticConversionFactor_V2_rad2"] = DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2
-        physics["SyntheticConversionFactorNote"] = dark_noise_synthetic_note()
+        physics["SyntheticConversionFactor_V2_rad2"] = factor
+        physics["SyntheticConversionFactorSource"] = factor_source
+        physics["SyntheticConversionFactorNote"] = (
+            dark_noise_reference_note(factor, reference_name) if reference_name else dark_noise_synthetic_note(factor)
+        )
+        if reference_name:
+            physics["DarkNoiseReferenceConversionFactor_V2_rad2"] = factor
+            for key in (
+                "DarkNoiseSyntheticWavelength_nm",
+                "DarkNoiseSyntheticDetectorResponsivity_A_per_W",
+                "DarkNoiseSyntheticRepRate_Hz",
+                "DarkNoiseSyntheticResponseTime_s",
+            ):
+                physics.pop(key, None)
+        else:
+            physics["DarkNoiseSyntheticWavelength_nm"] = DARK_NOISE_SYNTHETIC_WAVELENGTH_NM
+            physics["DarkNoiseSyntheticDetectorResponsivity_A_per_W"] = DARK_NOISE_SYNTHETIC_RESPONSIVITY_A_PER_W
+            physics["DarkNoiseSyntheticRepRate_Hz"] = DARK_NOISE_SYNTHETIC_REP_RATE_HZ
+            physics["DarkNoiseSyntheticResponseTime_s"] = DARK_NOISE_SYNTHETIC_RESPONSE_TIME_S
 
     polarizer_name = safe_text(first_value(payload, ("PhysicsData", "Polarizer"), ("Polarizer",)))
     if polarizer_name:

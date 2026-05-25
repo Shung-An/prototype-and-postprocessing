@@ -263,6 +263,13 @@
       gap: 8px;
       align-items: center;
     }
+    .card-actions {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: end;
+    }
     .card-body {
       display: grid;
       place-items: center;
@@ -283,6 +290,75 @@
       border-radius: 4px;
     }
     .video-card { grid-column: 1 / -1; }
+    .csv-plot-panel {
+      grid-column: 1 / -1;
+      padding: 10px;
+      display: none;
+      grid-template-columns: minmax(250px, 340px) minmax(360px, 1fr);
+      gap: 12px;
+      min-height: 420px;
+    }
+    .csv-controls {
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+    .csv-controls label {
+      display: grid;
+      gap: 4px;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .csv-controls select,
+    .csv-controls input[type="text"] {
+      border: 1px solid #b9c8ca;
+      border-radius: 4px;
+      padding: 7px 8px;
+      font: inherit;
+      width: 100%;
+      min-width: 0;
+    }
+    .csv-controls select[multiple] {
+      min-height: 142px;
+    }
+    .csv-button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .csv-check-row {
+      display: flex;
+      gap: 14px;
+      align-items: center;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .csv-check-row label {
+      display: inline-flex;
+      grid-template-columns: none;
+      gap: 6px;
+      align-items: center;
+      font-weight: 400;
+    }
+    .csv-plot-stage {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 8px;
+      min-width: 0;
+    }
+    .csv-source-list {
+      color: var(--muted);
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    #csvPlotCanvas {
+      width: 100%;
+      height: 520px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: white;
+    }
     .status { color: var(--muted); font-size: 13px; }
     @media (max-width: 1100px) {
       .plots-layout { grid-template-columns: 1fr; }
@@ -291,6 +367,7 @@
       .filters { grid-template-columns: 1fr; }
       header { grid-template-columns: 1fr; }
       .header-tools { justify-content: start; }
+      .csv-plot-panel { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -316,6 +393,7 @@
         <button id="chooseFolder" class="secondary">Choose DataFiles Folder</button>
         <button id="refresh">Refresh</button>
         <button id="rerunSelected">Rerun Selected</button>
+        <button id="archiveSelected" class="secondary">Archive Selected</button>
         <button id="rebuild" class="secondary">Rebuild Index</button>
         <button id="allMetadata" class="secondary">All Metadata</button>
       </div>
@@ -366,6 +444,51 @@
         <div id="plotRunList" class="compact-run-list"></div>
       </section>
       <section class="panel right">
+        <section class="card csv-plot-panel" aria-label="CSV plotter">
+          <div class="csv-controls">
+            <div class="card-title">CSV Plot</div>
+            <input id="csvFileInput" type="file" accept=".csv,text/csv" multiple>
+            <div class="csv-button-row">
+              <button id="loadSelectedLowCsv" class="secondary" type="button">Load Selected FFT Low CSV</button>
+              <button id="loadSelectedHighCsv" class="secondary" type="button">Load Selected FFT High CSV</button>
+            </div>
+            <label>
+              X column
+              <select id="csvXColumn"></select>
+            </label>
+            <label>
+              Y columns
+              <select id="csvYColumns" multiple></select>
+            </label>
+            <label>
+              Title
+              <input id="csvPlotTitle" type="text" value="CSV Plot">
+            </label>
+            <label>
+              X label
+              <input id="csvXLabel" type="text">
+            </label>
+            <label>
+              Y label
+              <input id="csvYLabel" type="text">
+            </label>
+            <div class="csv-check-row">
+              <label><input id="csvLogX" type="checkbox"> Log X</label>
+              <label><input id="csvLogY" type="checkbox"> Log Y</label>
+              <label><input id="csvGrid" type="checkbox" checked> Grid</label>
+            </div>
+            <div class="csv-button-row">
+              <button id="plotCsv" type="button">Plot</button>
+              <button id="saveCsvPng" class="secondary" type="button">Save PNG</button>
+              <button id="clearCsv" class="secondary" type="button">Clear</button>
+            </div>
+            <div id="csvPlotStatus" class="status">Choose CSV files or load the selected run FFT CSV.</div>
+          </div>
+          <div class="csv-plot-stage">
+            <div id="csvSourceList" class="csv-source-list">No CSV loaded.</div>
+            <canvas id="csvPlotCanvas"></canvas>
+          </div>
+        </section>
         <div class="selected-header">
           <div>
             <div id="selectedTitle" class="selected-title">Nothing selected</div>
@@ -377,6 +500,7 @@
             <button id="rerunThisRun" class="secondary">Rerun This Run</button>
             <button id="openFolder" class="secondary">Open Folder</button>
             <button id="playMp4" class="secondary">Play MP4</button>
+            <button id="archiveThisRun" class="secondary">Archive</button>
             <button id="toggleStar" class="secondary">Star</button>
           </div>
         </div>
@@ -385,6 +509,8 @@
           <div class="card video-card" data-kind="movie_path" data-media="video"><div class="card-title">MP4 Player <button class="secondary">Open</button></div><div class="card-body"></div></div>
           <div class="card" data-kind="final_result_path"><div class="card-title">Final Result <button class="secondary">Open</button></div><div class="card-body"></div></div>
           <div class="card" data-kind="loglog_plot_path"><div class="card-title">Log-Log Eval <button class="secondary">Open</button></div><div class="card-body"></div></div>
+          <div class="card" data-kind="fft_low_plot_path"><div class="card-title">FFT Low Log-Log <span class="card-actions"><button class="secondary" data-action="open">Open</button><button class="secondary" data-action="save-png">Save PNG</button></span></div><div class="card-body"></div></div>
+          <div class="card" data-kind="fft_high_plot_path"><div class="card-title">FFT High Semilog <button class="secondary">Open</button></div><div class="card-body"></div></div>
           <div class="card" data-kind="diagonal_offset_path"><div class="card-title">Diagonal Offset <button class="secondary">Open</button></div><div class="card-body"></div></div>
           <div class="card" data-kind="raw_std_plot_path"><div class="card-title">Raw Std Over Time <button class="secondary">Open</button></div><div class="card-body"></div></div>
         </div>
@@ -430,6 +556,14 @@
     const plotsTabButton = document.getElementById("plotsTabButton");
     const rerunSelectedButton = document.getElementById("rerunSelected");
     const chooseFolderButton = document.getElementById("chooseFolder");
+    const csvFileInput = document.getElementById("csvFileInput");
+    const csvXColumn = document.getElementById("csvXColumn");
+    const csvYColumns = document.getElementById("csvYColumns");
+    const csvPlotCanvas = document.getElementById("csvPlotCanvas");
+    const csvPlotStatus = document.getElementById("csvPlotStatus");
+    const csvSourceList = document.getElementById("csvSourceList");
+    let csvDatasets = [];
+    let lastCsvPlot = null;
 
     function text(value) { return value === undefined || value === null || value === "" ? "-" : String(value); }
     function assetUrl(path) {
@@ -437,10 +571,316 @@
       if (standaloneMode) return objectUrls.get(path) || "";
       return "/asset?path=" + encodeURIComponent(path);
     }
+    async function saveAsset(path, fallbackName = "plot.png") {
+      if (!path) return;
+      const filename = (path.split(/[\\/]/).pop() || fallbackName).replace(/[^\w.-]+/g, "_");
+      const response = await fetch(assetUrl(path));
+      if (!response.ok) throw new Error(await response.text());
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename || fallbackName;
+      link.click();
+      URL.revokeObjectURL(url);
+    }
     function numeric(value) {
       if (value === undefined || value === null || value === "-" || value === "") return null;
       const number = Number(value);
       return Number.isFinite(number) ? number : null;
+    }
+    function parseCsvLine(line) {
+      const cells = [];
+      let cell = "";
+      let quoted = false;
+      for (let index = 0; index < line.length; index += 1) {
+        const char = line[index];
+        const next = line[index + 1];
+        if (char === '"' && quoted && next === '"') {
+          cell += '"';
+          index += 1;
+        } else if (char === '"') {
+          quoted = !quoted;
+        } else if (char === "," && !quoted) {
+          cells.push(cell.trim());
+          cell = "";
+        } else {
+          cell += char;
+        }
+      }
+      cells.push(cell.trim());
+      return cells;
+    }
+    function parseCsvText(sourceName, csvText) {
+      const lines = csvText.replace(/^\uFEFF/, "").split(/\r?\n/).filter(line => line.trim());
+      if (lines.length < 2) throw new Error(`${sourceName} does not contain data rows.`);
+      const headers = parseCsvLine(lines[0]).map((header, index) => header || `Column ${index + 1}`);
+      const rows = lines.slice(1).map(line => {
+        const values = parseCsvLine(line);
+        const row = {};
+        headers.forEach((header, index) => { row[header] = values[index] ?? ""; });
+        return row;
+      });
+      return { name: sourceName, headers, rows };
+    }
+    function numericCsvColumns(dataset) {
+      return dataset.headers.filter(header =>
+        dataset.rows.some(row => Number.isFinite(Number(row[header])) && row[header] !== "")
+      );
+    }
+    function refreshCsvColumnSelectors() {
+      csvXColumn.innerHTML = "";
+      csvYColumns.innerHTML = "";
+      if (!csvDatasets.length) {
+        csvSourceList.textContent = "No CSV loaded.";
+        csvPlotStatus.textContent = "Choose CSV files or load the selected run FFT CSV.";
+        return;
+      }
+      const commonHeaders = csvDatasets.reduce((headers, dataset) =>
+        headers.filter(header => dataset.headers.includes(header)), [...csvDatasets[0].headers]
+      );
+      const numericHeaders = commonHeaders.filter(header =>
+        csvDatasets.some(dataset => numericCsvColumns(dataset).includes(header))
+      );
+      commonHeaders.forEach(header => {
+        const option = document.createElement("option");
+        option.value = header;
+        option.textContent = header;
+        csvXColumn.appendChild(option);
+      });
+      numericHeaders.forEach((header, index) => {
+        const option = document.createElement("option");
+        option.value = header;
+        option.textContent = header;
+        option.selected = index === Math.min(1, numericHeaders.length - 1);
+        csvYColumns.appendChild(option);
+      });
+      csvSourceList.textContent = csvDatasets.map(dataset => dataset.name).join(" | ");
+      csvPlotStatus.textContent = `Loaded ${csvDatasets.length} CSV file${csvDatasets.length === 1 ? "" : "s"}.`;
+    }
+    async function addCsvFiles(files) {
+      const loaded = [];
+      for (const file of files) {
+        const csvText = await file.text();
+        loaded.push(parseCsvText(file.name, csvText));
+      }
+      csvDatasets = loaded;
+      lastCsvPlot = null;
+      refreshCsvColumnSelectors();
+    }
+    async function loadSelectedCsvPath(kind) {
+      if (!selected) {
+        alert("Select a run first.");
+        return;
+      }
+      const path = selected[kind];
+      if (!path) {
+        alert("The selected run does not have that CSV yet. Run FFT analysis first.");
+        return;
+      }
+      const response = await fetch(assetUrl(path));
+      if (!response.ok) throw new Error(await response.text());
+      csvDatasets = [parseCsvText(path.split(/[\\/]/).pop() || path, await response.text())];
+      lastCsvPlot = null;
+      refreshCsvColumnSelectors();
+      setTab("plots");
+    }
+    function selectedCsvYColumns() {
+      return Array.from(csvYColumns.selectedOptions).map(option => option.value);
+    }
+    function csvSeriesValues(dataset, xColumn, yColumn, logX, logY) {
+      const points = [];
+      for (const row of dataset.rows) {
+        const x = Number(row[xColumn]);
+        const y = Number(row[yColumn]);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        if ((logX && x <= 0) || (logY && y <= 0)) continue;
+        points.push({ x: logX ? Math.log10(x) : x, y: logY ? Math.log10(y) : y, rawX: x, rawY: y });
+      }
+      return points;
+    }
+    function niceTicks(min, max, count = 6) {
+      if (!Number.isFinite(min) || !Number.isFinite(max)) return [];
+      if (min === max) {
+        min -= 1;
+        max += 1;
+      }
+      const span = max - min;
+      const rough = span / Math.max(1, count - 1);
+      const exponent = Math.floor(Math.log10(Math.abs(rough) || 1));
+      const fraction = rough / Math.pow(10, exponent);
+      const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 5 ? 5 : 10;
+      const step = niceFraction * Math.pow(10, exponent);
+      const first = Math.ceil(min / step) * step;
+      const ticks = [];
+      for (let value = first; value <= max + step * 0.5 && ticks.length < 12; value += step) {
+        ticks.push(value);
+      }
+      return ticks;
+    }
+    function tickLabel(value, isLog) {
+      const raw = isLog ? Math.pow(10, value) : value;
+      if (Math.abs(raw) >= 10000 || Math.abs(raw) < 0.001) return raw.toExponential(1);
+      return Number(raw.toPrecision(4)).toString();
+    }
+    function plotCsv() {
+      const xColumn = csvXColumn.value;
+      const yColumns = selectedCsvYColumns();
+      if (!csvDatasets.length || !xColumn || !yColumns.length) {
+        alert("Load CSV data and select one X column plus at least one Y column.");
+        return;
+      }
+      const logX = document.getElementById("csvLogX").checked;
+      const logY = document.getElementById("csvLogY").checked;
+      const palette = ["#176f7a", "#b9413f", "#6f5fb7", "#23824d", "#b1781c", "#244f9e", "#8b3f77", "#3e6f66"];
+      const series = [];
+      csvDatasets.forEach(dataset => {
+        yColumns.forEach(yColumn => {
+          if (!dataset.headers.includes(xColumn) || !dataset.headers.includes(yColumn)) return;
+          const points = csvSeriesValues(dataset, xColumn, yColumn, logX, logY);
+          if (points.length) series.push({ label: `${dataset.name}: ${yColumn}`, points });
+        });
+      });
+      if (!series.length) {
+        alert("No numeric points were found for the selected columns.");
+        return;
+      }
+      const canvas = csvPlotCanvas;
+      const rect = canvas.getBoundingClientRect();
+      const scale = window.devicePixelRatio || 1;
+      canvas.width = Math.max(900, Math.round(rect.width * scale));
+      canvas.height = Math.max(560, Math.round(rect.height * scale));
+      const ctx = canvas.getContext("2d");
+      ctx.setTransform(scale, 0, 0, scale, 0, 0);
+      const width = canvas.width / scale;
+      const height = canvas.height / scale;
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, width, height);
+
+      const allX = series.flatMap(item => item.points.map(point => point.x));
+      const allY = series.flatMap(item => item.points.map(point => point.y));
+      let xMin = Math.min(...allX);
+      let xMax = Math.max(...allX);
+      let yMin = Math.min(...allY);
+      let yMax = Math.max(...allY);
+      if (xMin === xMax) { xMin -= 1; xMax += 1; }
+      if (yMin === yMax) { yMin -= 1; yMax += 1; }
+      const xPad = (xMax - xMin) * 0.04;
+      const yPad = (yMax - yMin) * 0.08;
+      xMin -= xPad;
+      xMax += xPad;
+      yMin -= yPad;
+      yMax += yPad;
+
+      const margin = { left: 74, right: 34, top: 58, bottom: 68 };
+      const plotWidth = width - margin.left - margin.right;
+      const plotHeight = height - margin.top - margin.bottom;
+      const px = value => margin.left + ((value - xMin) / (xMax - xMin)) * plotWidth;
+      const py = value => margin.top + plotHeight - ((value - yMin) / (yMax - yMin)) * plotHeight;
+      const showGrid = document.getElementById("csvGrid").checked;
+      const xTicks = niceTicks(xMin, xMax);
+      const yTicks = niceTicks(yMin, yMax);
+
+      ctx.strokeStyle = "#12353c";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(margin.left, margin.top, plotWidth, plotHeight);
+      ctx.font = "12px Segoe UI, Arial, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      xTicks.forEach(tick => {
+        const x = px(tick);
+        if (showGrid) {
+          ctx.strokeStyle = "#d6e0e2";
+          ctx.beginPath();
+          ctx.moveTo(x, margin.top);
+          ctx.lineTo(x, margin.top + plotHeight);
+          ctx.stroke();
+        }
+        ctx.fillStyle = "#12353c";
+        ctx.fillText(tickLabel(tick, logX), x, margin.top + plotHeight + 8);
+      });
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      yTicks.forEach(tick => {
+        const y = py(tick);
+        if (showGrid) {
+          ctx.strokeStyle = "#d6e0e2";
+          ctx.beginPath();
+          ctx.moveTo(margin.left, y);
+          ctx.lineTo(margin.left + plotWidth, y);
+          ctx.stroke();
+        }
+        ctx.fillStyle = "#12353c";
+        ctx.fillText(tickLabel(tick, logY), margin.left - 8, y);
+      });
+
+      series.forEach((item, index) => {
+        ctx.strokeStyle = palette[index % palette.length];
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        item.points.forEach((point, pointIndex) => {
+          const x = px(point.x);
+          const y = py(point.y);
+          if (pointIndex === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      });
+
+      const title = document.getElementById("csvPlotTitle").value || "CSV Plot";
+      const xLabel = document.getElementById("csvXLabel").value || xColumn;
+      const yLabel = document.getElementById("csvYLabel").value || yColumns.join(", ");
+      ctx.fillStyle = "#12353c";
+      ctx.font = "700 17px Segoe UI, Arial, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(title, width / 2, 24);
+      ctx.font = "13px Segoe UI, Arial, sans-serif";
+      ctx.fillText(xLabel, margin.left + plotWidth / 2, height - 24);
+      ctx.save();
+      ctx.translate(20, margin.top + plotHeight / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText(yLabel, 0, 0);
+      ctx.restore();
+
+      const legendX = margin.left + 12;
+      let legendY = margin.top + 12;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.font = "12px Segoe UI, Arial, sans-serif";
+      series.forEach((item, index) => {
+        const y = legendY + index * 18;
+        ctx.strokeStyle = palette[index % palette.length];
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(legendX, y);
+        ctx.lineTo(legendX + 24, y);
+        ctx.stroke();
+        ctx.fillStyle = "#12353c";
+        ctx.fillText(item.label, legendX + 32, y);
+      });
+      lastCsvPlot = { title };
+      csvPlotStatus.textContent = `Plotted ${series.length} trace${series.length === 1 ? "" : "s"} with legend.`;
+    }
+    function saveCsvPng() {
+      if (!lastCsvPlot) plotCsv();
+      if (!lastCsvPlot) return;
+      const link = document.createElement("a");
+      const filename = (lastCsvPlot.title || "csv_plot").replace(/[^\w.-]+/g, "_") + ".png";
+      link.download = filename;
+      link.href = csvPlotCanvas.toDataURL("image/png");
+      link.click();
+    }
+    function clearCsvPlot() {
+      csvDatasets = [];
+      lastCsvPlot = null;
+      csvFileInput.value = "";
+      csvXColumn.innerHTML = "";
+      csvYColumns.innerHTML = "";
+      const ctx = csvPlotCanvas.getContext("2d");
+      ctx.clearRect(0, 0, csvPlotCanvas.width, csvPlotCanvas.height);
+      refreshCsvColumnSelectors();
     }
     function estimateDarkNoiseSyntheticConversionFactorV2Rad2(
       portPowerMw = darkNoiseTagPortPowerEstimateMw,
@@ -672,22 +1112,32 @@
         renderMetric("Range mm", selected.scan_range),
         renderMetric("Scan Rate mm/s", selected.scan_rate)
       ].join("");
-      document.querySelectorAll(".card").forEach(card => {
+      document.querySelectorAll(".preview-grid .card[data-kind]").forEach(card => {
         const key = card.dataset.kind;
         const isVideo = card.dataset.media === "video";
         const body = card.querySelector(".card-body");
-        const button = card.querySelector("button");
+        const openButton = card.querySelector('[data-action="open"]') || card.querySelector("button");
+        const saveButton = card.querySelector('[data-action="save-png"]');
+        if (!body || !openButton) return;
         const path = selected[key];
         if (path) {
           body.innerHTML = isVideo
             ? `<video controls preload="metadata" src="${assetUrl(path)}"></video>`
             : `<img src="${assetUrl(path)}" alt="">`;
-          button.disabled = false;
-          button.onclick = () => openPath(path);
+          openButton.disabled = false;
+          openButton.onclick = () => openPath(path);
+          if (saveButton) {
+            saveButton.disabled = false;
+            saveButton.onclick = () => saveAsset(path, "fft_low_loglog.png").catch(err => alert(err.message));
+          }
         } else {
           body.textContent = isVideo ? "No MP4 found" : "Not found";
-          button.disabled = true;
-          button.onclick = null;
+          openButton.disabled = true;
+          openButton.onclick = null;
+          if (saveButton) {
+            saveButton.disabled = true;
+            saveButton.onclick = null;
+          }
         }
       });
     }
@@ -724,6 +1174,25 @@
     function rerunTargets(useCurrentOnly = false) {
       if (useCurrentOnly && selected) return [selected.folder_path];
       return Array.from(checkedRuns);
+    }
+    async function archiveSelectedRuns(useCurrentOnly = false) {
+      if (standaloneMode) {
+        alert("Archiving needs the Python DataFiles Browser server.");
+        return;
+      }
+      const folderPaths = rerunTargets(useCurrentOnly);
+      if (!folderPaths.length) {
+        alert(useCurrentOnly ? "Select a run first." : "Check at least one run first, or use Archive for the highlighted run.");
+        return;
+      }
+      const label = folderPaths.length === 1 ? "1 run" : `${folderPaths.length} runs`;
+      const preview = folderPaths.slice(0, 8).map(path => path.split(/[\\/]/).pop()).join("\n");
+      const extra = folderPaths.length > 8 ? `\n... and ${folderPaths.length - 8} more` : "";
+      if (!confirm(`Archive ${label}?\n\nThis moves the folder out of the active DataFiles browser into ArchivedDataFiles.\n\n${preview}${extra}`)) return;
+      const data = await postJson("/api/archive", { folder_paths: folderPaths });
+      folderPaths.forEach(folderPath => checkedRuns.delete(folderPath));
+      setAnalysisStatus(data.message || `Archived ${label}.`);
+      await loadRuns(true);
     }
     async function rerunSelected(useCurrentOnly = false) {
       if (standaloneMode) {
@@ -905,10 +1374,11 @@
     }
     function useOpoDisplay(payload) {
       const value = firstValue(payload, [
-        ["PhysicsData", "UseOPO"], ["PhysicsData", "UseOpo"], ["PhysicsData", "Use_OPO"], ["PhysicsData", "UseOPOOption"],
-        ["PhysicsData", "OPOEnabled"], ["PhysicsData", "OPO"], ["Configuration", "UseOPO"], ["Configuration", "UseOpo"],
-        ["Configuration", "UseOPOOption"], ["Configuration", "OPOEnabled"], ["UseOPO"], ["UseOpo"], ["UseOPOOption"],
-        ["OPOEnabled"], ["OPO"]
+        ["PhysicsData", "UseOPO"], ["PhysicsData", "UseOpo"], ["PhysicsData", "UsedOPO"], ["PhysicsData", "UsedOpo"],
+        ["PhysicsData", "Use_OPO"], ["PhysicsData", "UseOPOOption"], ["PhysicsData", "OPOEnabled"], ["PhysicsData", "OPO"],
+        ["Configuration", "UseOPO"], ["Configuration", "UseOpo"], ["Configuration", "UsedOPO"], ["Configuration", "UsedOpo"],
+        ["Configuration", "UseOPOOption"], ["Configuration", "OPOEnabled"], ["UseOPO"], ["UseOpo"], ["UsedOPO"], ["UsedOpo"],
+        ["UseOPOOption"], ["OPOEnabled"], ["OPO"]
       ]);
       if (value === null) return { display: "-", sort: -1 };
       const enabled = safeBool(value);
@@ -1046,7 +1516,7 @@
         power2 = darkNoiseTagPortPowerEstimateMw;
       }
       const darkNoiseNote = hasDarkNoiseTag(tags)
-        ? darkNoiseSyntheticNote()
+        ? safeText(firstValue(metadata, [["PhysicsData", "SyntheticConversionFactorNote"], ["SyntheticConversionFactorNote"]])) || darkNoiseSyntheticNote()
         : "";
       const run = {
         folder_name: folderName,
@@ -1163,13 +1633,21 @@
     plotSearch.addEventListener("input", renderPlotRunList);
     runListTabButton.addEventListener("click", () => setTab("runs"));
     plotsTabButton.addEventListener("click", () => setTab("plots"));
+    csvFileInput.addEventListener("change", () => addCsvFiles(csvFileInput.files).catch(err => alert(err.message)));
+    document.getElementById("loadSelectedLowCsv").addEventListener("click", () => loadSelectedCsvPath("fft_low_csv_path").catch(err => alert(err.message)));
+    document.getElementById("loadSelectedHighCsv").addEventListener("click", () => loadSelectedCsvPath("fft_high_csv_path").catch(err => alert(err.message)));
+    document.getElementById("plotCsv").addEventListener("click", plotCsv);
+    document.getElementById("saveCsvPng").addEventListener("click", saveCsvPng);
+    document.getElementById("clearCsv").addEventListener("click", clearCsvPlot);
     chooseFolderButton.addEventListener("click", () => {
       if (standaloneMode) chooseStandaloneFolder().catch(err => setAnalysisStatus(err.message));
       else alert("Folder picking is only used when index.html is opened directly as a standalone file.");
     });
     document.getElementById("refresh").addEventListener("click", () => reloadPreservingSelection(false));
     rerunSelectedButton.addEventListener("click", () => rerunSelected(false).catch(err => alert(err.message)));
+    document.getElementById("archiveSelected").addEventListener("click", () => archiveSelectedRuns(false).catch(err => alert(err.message)));
     document.getElementById("rerunThisRun").addEventListener("click", () => rerunSelected(true).catch(err => alert(err.message)));
+    document.getElementById("archiveThisRun").addEventListener("click", () => archiveSelectedRuns(true).catch(err => alert(err.message)));
     document.getElementById("rebuild").addEventListener("click", () => reloadPreservingSelection(true));
     document.getElementById("allMetadata").addEventListener("click", () => {
       if (standaloneMode) alert("Bulk metadata editing needs metadata_manager.py. Standalone mode can browse runs and toggle stars.");
@@ -1198,7 +1676,9 @@
     if (standaloneMode) {
       document.getElementById("rerunThisRun").disabled = true;
       document.getElementById("openFolder").disabled = true;
+      document.getElementById("archiveThisRun").disabled = true;
       rerunSelectedButton.disabled = true;
+      document.getElementById("archiveSelected").disabled = true;
       document.getElementById("allMetadata").disabled = true;
       document.getElementById("rebuild").textContent = "Rescan Folder";
       document.getElementById("refresh").textContent = "Refresh Folder";

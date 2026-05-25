@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -43,6 +44,23 @@ except ImportError:
     def launch_html_editor(root: Path, wait: bool = True) -> str:
         raise RuntimeError("metadata_manager.py is required for the HTML metadata editor.")
 
+try:
+    from raw_interleaved_fft import (
+        FFT_OUTPUT_DIR_NAME,
+        HIGH_FREQUENCY_CSV_NAME,
+        HIGH_FREQUENCY_PLOT_NAME,
+        LOW_FREQUENCY_CSV_NAME,
+        LOW_FREQUENCY_PLOT_NAME,
+        sync_fft_metadata_for_run,
+    )
+except ImportError:
+    FFT_OUTPUT_DIR_NAME = "fft_analysis"
+    LOW_FREQUENCY_PLOT_NAME = "interleaved_fft_low_frequency_loglog.png"
+    LOW_FREQUENCY_CSV_NAME = "interleaved_fft_low_frequency_loglog.csv"
+    HIGH_FREQUENCY_PLOT_NAME = "interleaved_fft_high_frequency_semilog.png"
+    HIGH_FREQUENCY_CSV_NAME = "interleaved_fft_high_frequency_semilog.csv"
+    sync_fft_metadata_for_run = None
+
 
 ROOT_DEFAULT = Path(r"D:\Quantum Squeezing Project\DataFiles")
 FINAL_RESULT_NAME = "final_clean_result.png"
@@ -54,6 +72,7 @@ RAW_STD_PLOT_NAMES = ("raw_std_over_time.png", "raw_std_within_parity.png")
 CONFIG_PATH = Path(tempfile.gettempdir()) / "quantum_datafiles_browser_config.json"
 INDEX_DB_PATH = Path(tempfile.gettempdir()) / "quantum_datafiles_browser_index.sqlite3"
 INDEX_SCHEMA_VERSION = 2
+ARCHIVE_ROOT_NAME = "ArchivedDataFiles"
 DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW = 0.01
 DARK_NOISE_TAG_POWER_ESTIMATE_MW = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW * 2.0
 DARK_NOISE_SYNTHETIC_WAVELENGTH_NM = 1550.0
@@ -102,6 +121,13 @@ def dark_noise_synthetic_note(factor: float | None = None) -> str:
         f"from {DARK_NOISE_SYNTHETIC_WAVELENGTH_NM:g} nm, "
         f"{DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW:g} mW per detector port; "
         "results shown in artificial urad^2"
+    )
+
+
+def dark_noise_reference_note(factor: float, reference_name: str) -> str:
+    return (
+        f"{DARK_NOISE_TAG_NAME} tag: using nearest non-Dark Noise conversion factor "
+        f"{factor:.6g} V^2/rad^2 from {reference_name}; results shown in artificial urad^2"
     )
 
 
@@ -159,6 +185,9 @@ class PhysicsData:
     scan_velocity_mm_s: float | None = None
     synthetic_conversion_factor_applied: bool = False
     synthetic_conversion_factor_v2_rad2: float | None = None
+    dark_noise_reference_run_name: str = ""
+    dark_noise_reference_run_folder: str = ""
+    dark_noise_reference_time_delta_s: float | None = None
 
     @property
     def center_mm(self) -> float | None:
@@ -178,6 +207,10 @@ class RunRecord:
     raw_std_plot_path: Path | None
     metadata_path: Path | None
     sortable_date: datetime
+    fft_low_plot_path: Path | None = None
+    fft_high_plot_path: Path | None = None
+    fft_low_csv_path: Path | None = None
+    fft_high_csv_path: Path | None = None
     sample: str = ""
     exp_tag: str = ""
     description: str = ""
@@ -374,6 +407,80 @@ def has_dark_noise_tag(tags: list[str]) -> bool:
     return DARK_NOISE_TAG_KEY in normalized
 
 
+def metadata_run_timestamp(folder_path: Path, payload: dict[str, object] | None = None) -> datetime:
+    payload = payload or {}
+    timestamp = payload.get("Timestamp")
+    if isinstance(timestamp, str):
+        try:
+            return datetime.fromisoformat(timestamp)
+        except ValueError:
+            pass
+    return parse_folder_datetime(folder_path.name, folder_path)
+
+
+def payload_is_dark_noise(payload: dict[str, object]) -> bool:
+    if has_dark_noise_tag(safe_tags(payload.get("Tags"))):
+        return True
+    physics_value = payload.get("PhysicsData")
+    physics = physics_value if isinstance(physics_value, dict) else {}
+    label = safe_text(physics.get("DarkNoiseLabel")).lower()
+    return label == DARK_NOISE_TAG_KEY or safe_bool(physics.get("IsDarkNoiseRun"))
+
+
+def payload_reference_conversion_factor(payload: dict[str, object]) -> float | None:
+    return first_matching_float(
+        payload,
+        [
+            ("PhysicsData", "ConversionFactor_V2_rad2"),
+            ("ConversionFactor_V2_rad2",),
+            ("PhysicsData", "ConversionFactor"),
+            ("ConversionFactor",),
+        ],
+    )
+
+
+def nearest_non_dark_reference(run_folder: Path) -> dict[str, object] | None:
+    metadata_path = run_folder / "metadata.json"
+    try:
+        target_payload = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+    except Exception:
+        target_payload = {}
+    target_time = metadata_run_timestamp(run_folder, target_payload if isinstance(target_payload, dict) else {})
+    best: dict[str, object] | None = None
+    best_delta = math.inf
+
+    parent = run_folder.parent
+    if not parent.is_dir():
+        return None
+    for candidate in parent.iterdir():
+        if not candidate.is_dir() or candidate == run_folder:
+            continue
+        candidate_metadata = candidate / "metadata.json"
+        if not candidate_metadata.is_file():
+            continue
+        try:
+            payload = json.loads(candidate_metadata.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict) or payload_is_dark_noise(payload):
+            continue
+        factor = payload_reference_conversion_factor(payload)
+        if factor is None or factor <= 0:
+            continue
+        candidate_time = metadata_run_timestamp(candidate, payload)
+        delta_s = abs((candidate_time - target_time).total_seconds())
+        if delta_s < best_delta:
+            best_delta = delta_s
+            best = {
+                "factor": factor,
+                "folder": str(candidate),
+                "name": candidate.name,
+                "timestamp": candidate_time.isoformat(timespec="seconds"),
+                "time_delta_s": delta_s,
+            }
+    return best
+
+
 def canonicalize_dark_noise_tags(tags: list[str]) -> list[str]:
     result: list[str] = []
     has_dark_noise = False
@@ -392,24 +499,36 @@ def canonicalize_dark_noise_tags(tags: list[str]) -> list[str]:
 def apply_dark_noise_tag_power_estimate(record: RunRecord) -> None:
     if not has_dark_noise_tag(record.tags):
         return
+    reference = nearest_non_dark_reference(record.folder_path)
     record.physics.sample_power_mw = DARK_NOISE_TAG_POWER_ESTIMATE_MW
     record.physics.power_mw_1 = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW
     record.physics.power_mw_2 = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW
     record.physics.is_dark_noise_run = True
     record.physics.synthetic_conversion_factor_applied = True
-    record.physics.synthetic_conversion_factor_v2_rad2 = DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2
+    if reference:
+        record.physics.synthetic_conversion_factor_v2_rad2 = float(reference["factor"])
+        record.physics.dark_noise_reference_run_name = str(reference["name"])
+        record.physics.dark_noise_reference_run_folder = str(reference["folder"])
+        record.physics.dark_noise_reference_time_delta_s = float(reference["time_delta_s"])
+    elif record.physics.synthetic_conversion_factor_v2_rad2 is None:
+        record.physics.synthetic_conversion_factor_v2_rad2 = DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2
 
 
 def dark_noise_note(record: RunRecord) -> str:
     if not record.physics.synthetic_conversion_factor_applied and not has_dark_noise_tag(record.tags):
         return ""
-    return dark_noise_synthetic_note(record.physics.synthetic_conversion_factor_v2_rad2)
+    factor = record.physics.synthetic_conversion_factor_v2_rad2 or DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2
+    if record.physics.dark_noise_reference_run_name:
+        return dark_noise_reference_note(factor, record.physics.dark_noise_reference_run_name)
+    return dark_noise_synthetic_note(factor)
 
 
-def apply_dark_noise_metadata_config(payload: dict[str, object]) -> bool:
+def apply_dark_noise_metadata_config(payload: dict[str, object], run_folder: Path | None = None) -> bool:
     tags = canonicalize_dark_noise_tags(safe_tags(payload.get("Tags")))
     if not has_dark_noise_tag(tags):
         return False
+    reference = nearest_non_dark_reference(run_folder) if run_folder is not None else None
+    factor = float(reference["factor"]) if reference else DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2
     payload["Tags"] = tags
     physics_value = payload.get("PhysicsData")
     physics = physics_value if isinstance(physics_value, dict) else {}
@@ -419,21 +538,48 @@ def apply_dark_noise_metadata_config(payload: dict[str, object]) -> bool:
     updated["OnSamplePower_mW"] = DARK_NOISE_TAG_POWER_ESTIMATE_MW
     updated["DarkNoiseTagPowerEstimate_mW"] = DARK_NOISE_TAG_POWER_ESTIMATE_MW
     updated["DarkNoiseTagPortPowerEstimate_mW"] = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW
-    updated["DarkNoiseSyntheticWavelength_nm"] = DARK_NOISE_SYNTHETIC_WAVELENGTH_NM
-    updated["DarkNoiseSyntheticDetectorResponsivity_A_per_W"] = DARK_NOISE_SYNTHETIC_RESPONSIVITY_A_PER_W
-    updated["DarkNoiseSyntheticRepRate_Hz"] = DARK_NOISE_SYNTHETIC_REP_RATE_HZ
-    updated["DarkNoiseSyntheticResponseTime_s"] = DARK_NOISE_SYNTHETIC_RESPONSE_TIME_S
     updated["IsDarkNoiseRun"] = True
     updated["DarkNoiseLabel"] = DARK_NOISE_TAG_NAME
     updated["DarkNoiseReason"] = (
-        f"metadata tag {DARK_NOISE_TAG_NAME} uses {DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW:g} mW per detector port "
-        f"at {DARK_NOISE_SYNTHETIC_WAVELENGTH_NM:g} nm and synthetic conversion factor "
-        f"{DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2:.6g} V^2/rad^2"
+        f"metadata tag {DARK_NOISE_TAG_NAME} uses nearest non-Dark Noise conversion factor "
+        f"{factor:.6g} V^2/rad^2 from {reference['name']}"
+        if reference
+        else (
+            f"metadata tag {DARK_NOISE_TAG_NAME} uses {DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW:g} mW per detector port "
+            f"at {DARK_NOISE_SYNTHETIC_WAVELENGTH_NM:g} nm and fallback synthetic conversion factor "
+            f"{factor:.6g} V^2/rad^2"
+        )
     )
     updated["DisplayAmplitudeUnit"] = "urad^2"
     updated["SyntheticConversionFactorApplied"] = True
-    updated["SyntheticConversionFactor_V2_rad2"] = DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2
-    updated["SyntheticConversionFactorNote"] = dark_noise_synthetic_note()
+    updated["SyntheticConversionFactor_V2_rad2"] = factor
+    updated["SyntheticConversionFactorSource"] = (
+        "nearest non-Dark Noise measurement" if reference else "fallback synthetic estimate"
+    )
+    updated["SyntheticConversionFactorNote"] = (
+        dark_noise_reference_note(factor, str(reference["name"])) if reference else dark_noise_synthetic_note(factor)
+    )
+    for key in (
+        "DarkNoiseReferenceRunFolder",
+        "DarkNoiseReferenceRunName",
+        "DarkNoiseReferenceTimeDelta_s",
+        "DarkNoiseReferenceConversionFactor_V2_rad2",
+        "DarkNoiseSyntheticWavelength_nm",
+        "DarkNoiseSyntheticDetectorResponsivity_A_per_W",
+        "DarkNoiseSyntheticRepRate_Hz",
+        "DarkNoiseSyntheticResponseTime_s",
+    ):
+        updated.pop(key, None)
+    if reference:
+        updated["DarkNoiseReferenceRunFolder"] = reference["folder"]
+        updated["DarkNoiseReferenceRunName"] = reference["name"]
+        updated["DarkNoiseReferenceTimeDelta_s"] = reference["time_delta_s"]
+        updated["DarkNoiseReferenceConversionFactor_V2_rad2"] = factor
+    else:
+        updated["DarkNoiseSyntheticWavelength_nm"] = DARK_NOISE_SYNTHETIC_WAVELENGTH_NM
+        updated["DarkNoiseSyntheticDetectorResponsivity_A_per_W"] = DARK_NOISE_SYNTHETIC_RESPONSIVITY_A_PER_W
+        updated["DarkNoiseSyntheticRepRate_Hz"] = DARK_NOISE_SYNTHETIC_REP_RATE_HZ
+        updated["DarkNoiseSyntheticResponseTime_s"] = DARK_NOISE_SYNTHETIC_RESPONSE_TIME_S
     payload["PhysicsData"] = updated
     return updated != physics
 
@@ -479,16 +625,22 @@ def metadata_use_opo(payload: dict[str, object]) -> bool | None:
         [
             ("PhysicsData", "UseOPO"),
             ("PhysicsData", "UseOpo"),
+            ("PhysicsData", "UsedOPO"),
+            ("PhysicsData", "UsedOpo"),
             ("PhysicsData", "Use_OPO"),
             ("PhysicsData", "UseOPOOption"),
             ("PhysicsData", "OPOEnabled"),
             ("PhysicsData", "OPO"),
             ("Configuration", "UseOPO"),
             ("Configuration", "UseOpo"),
+            ("Configuration", "UsedOPO"),
+            ("Configuration", "UsedOpo"),
             ("Configuration", "UseOPOOption"),
             ("Configuration", "OPOEnabled"),
             ("UseOPO",),
             ("UseOpo",),
+            ("UsedOPO",),
+            ("UsedOpo",),
             ("UseOPOOption",),
             ("OPOEnabled",),
             ("OPO",),
@@ -632,6 +784,11 @@ def first_existing_path(folder_path: Path, names: tuple[str, ...]) -> Path | Non
     return None
 
 
+def fft_output_path(folder_path: Path, name: str) -> Path | None:
+    candidate = folder_path / FFT_OUTPUT_DIR_NAME / name
+    return candidate if candidate.exists() else None
+
+
 def load_run_record(final_result_path: Path) -> RunRecord:
     folder_path = final_result_path.parent
     folder_name = folder_path.name
@@ -647,7 +804,18 @@ def load_run_record(final_result_path: Path) -> RunRecord:
         raw_std_plot_path=first_existing_path(folder_path, RAW_STD_PLOT_NAMES),
         metadata_path=metadata_path if metadata_path.exists() else None,
         sortable_date=parse_folder_datetime(folder_name, folder_path),
+        fft_low_plot_path=fft_output_path(folder_path, LOW_FREQUENCY_PLOT_NAME),
+        fft_high_plot_path=fft_output_path(folder_path, HIGH_FREQUENCY_PLOT_NAME),
+        fft_low_csv_path=fft_output_path(folder_path, LOW_FREQUENCY_CSV_NAME),
+        fft_high_csv_path=fft_output_path(folder_path, HIGH_FREQUENCY_CSV_NAME),
     )
+
+    if sync_fft_metadata_for_run is not None and (record.fft_low_csv_path or record.fft_high_csv_path):
+        try:
+            if sync_fft_metadata_for_run(folder_path):
+                record.metadata_path = metadata_path
+        except Exception:
+            pass
 
     if record.metadata_path and record.metadata_path.exists():
         try:
@@ -679,7 +847,7 @@ def load_run_record(final_result_path: Path) -> RunRecord:
             )
             record.description = safe_text(payload.get("Description"))
             record.tags = safe_tags(payload.get("Tags"))
-            if apply_dark_noise_metadata_config(payload):
+            if apply_dark_noise_metadata_config(payload, record.folder_path):
                 normalized_payload = normalize_metadata(payload)
                 record.metadata_path.write_text(json.dumps(normalized_payload, indent=2), encoding="utf-8")
                 record.metadata_text = json.dumps(normalized_payload, indent=2)
@@ -787,6 +955,9 @@ def load_run_record(final_result_path: Path) -> RunRecord:
                 scan_velocity_mm_s=metadata_scan_velocity_mm_s(payload),
                 synthetic_conversion_factor_applied=safe_bool(physics.get("SyntheticConversionFactorApplied")),
                 synthetic_conversion_factor_v2_rad2=safe_float(physics.get("SyntheticConversionFactor_V2_rad2")),
+                dark_noise_reference_run_name=safe_text(physics.get("DarkNoiseReferenceRunName")),
+                dark_noise_reference_run_folder=safe_text(physics.get("DarkNoiseReferenceRunFolder")),
+                dark_noise_reference_time_delta_s=safe_float(physics.get("DarkNoiseReferenceTimeDelta_s")),
             )
             apply_browser_metadata_fields(record, payload)
             apply_dark_noise_tag_power_estimate(record)
@@ -1223,6 +1394,10 @@ def serialize_run(run: RunRecord) -> dict[str, object]:
         "loglog_plot_path": str(run.loglog_plot_path) if run.loglog_plot_path else "",
         "diagonal_offset_path": str(run.diagonal_offset_path) if run.diagonal_offset_path else "",
         "raw_std_plot_path": str(run.raw_std_plot_path) if run.raw_std_plot_path else "",
+        "fft_low_plot_path": str(fft_output_path(run.folder_path, LOW_FREQUENCY_PLOT_NAME) or run.fft_low_plot_path or ""),
+        "fft_high_plot_path": str(fft_output_path(run.folder_path, HIGH_FREQUENCY_PLOT_NAME) or run.fft_high_plot_path or ""),
+        "fft_low_csv_path": str(fft_output_path(run.folder_path, LOW_FREQUENCY_CSV_NAME) or run.fft_low_csv_path or ""),
+        "fft_high_csv_path": str(fft_output_path(run.folder_path, HIGH_FREQUENCY_CSV_NAME) or run.fft_high_csv_path or ""),
         "metadata_path": str(run.metadata_path) if run.metadata_path else "",
         "metadata_text": run.metadata_text,
     }
@@ -1294,8 +1469,43 @@ def launch_html_browser(root_path: Path | None = None, wait: bool = True) -> str
                 selected_runs.append(run)
                 seen.add(key)
         if not selected_runs:
-            raise ValueError("Select at least one run to rerun.")
+            raise ValueError("Select at least one run.")
         return selected_runs
+
+    def unique_archive_destination(source: Path, archive_root: Path) -> Path:
+        destination = archive_root / source.name
+        if not destination.exists():
+            return destination
+
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        candidate = archive_root / f"{source.name}_archived_{stamp}"
+        counter = 2
+        while candidate.exists():
+            candidate = archive_root / f"{source.name}_archived_{stamp}_{counter}"
+            counter += 1
+        return candidate
+
+    def archive_runs(selected_runs: list[RunRecord]) -> list[dict[str, str]]:
+        archive_root = (root.parent / ARCHIVE_ROOT_NAME).expanduser().resolve()
+        archive_root.mkdir(parents=True, exist_ok=True)
+
+        archived: list[dict[str, str]] = []
+        root_resolved = root.expanduser().resolve()
+        for run in selected_runs:
+            source = run.folder_path.expanduser().resolve()
+            try:
+                source.relative_to(root_resolved)
+            except ValueError as exc:
+                raise ValueError(f"Run is not inside the active DataFiles root: {source}") from exc
+            if not source.is_dir():
+                raise ValueError(f"Run folder was not found: {source}")
+
+            destination = unique_archive_destination(source, archive_root)
+            shutil.move(str(source), str(destination))
+            archived.append({"source": str(source), "destination": str(destination)})
+
+        load_current_runs(rebuild=True)
+        return archived
 
     def rerun_analysis_subprocess(script_path: Path, folder_paths: list[Path], label: str) -> None:
         command = [sys.executable, str(script_path), "--force", *[str(path) for path in folder_paths]]
@@ -1380,6 +1590,10 @@ def launch_html_browser(root_path: Path | None = None, wait: bool = True) -> str
                 run.loglog_plot_path,
                 run.diagonal_offset_path,
                 run.raw_std_plot_path,
+                fft_output_path(run.folder_path, LOW_FREQUENCY_PLOT_NAME),
+                fft_output_path(run.folder_path, HIGH_FREQUENCY_PLOT_NAME),
+                fft_output_path(run.folder_path, LOW_FREQUENCY_CSV_NAME),
+                fft_output_path(run.folder_path, HIGH_FREQUENCY_CSV_NAME),
                 run.metadata_path,
                 run.folder_path / "metadata.json",
             ]
@@ -1493,6 +1707,24 @@ def launch_html_browser(root_path: Path | None = None, wait: bool = True) -> str
                     path = allowed_path(str(data.get("path", "")))
                     os.startfile(path)  # type: ignore[attr-defined]
                     self.send_json({"ok": True})
+                    return
+                if parsed.path == "/api/archive":
+                    with analysis_lock:
+                        if bool(analysis_state.get("running")):
+                            raise ValueError("An analysis job is already in progress.")
+                    selected_runs = selected_runs_from_payload(data)
+                    archived = archive_runs(selected_runs)
+                    count = len(archived)
+                    archive_path = str(root.parent / ARCHIVE_ROOT_NAME)
+                    label = "1 run" if count == 1 else f"{count} runs"
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "message": f"Archived {label} to {archive_path}.",
+                            "archived": archived,
+                            "archive_root": archive_path,
+                        }
+                    )
                     return
                 if parsed.path == "/api/rerun":
                     with analysis_lock:

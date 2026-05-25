@@ -31,7 +31,7 @@ BIN_MM = 0.1
 # Attenuator correction is supplied by WPF metadata and read directly by this pipeline.
 DETECTOR_AREA_SCALE = (0.24**2) / (32768**2)
 # Bump this when a code or assumption change should force existing runs to rebuild once.
-PIPELINE_CACHE_VERSION = "2026-05-14-dark-noise-synthetic-factor-v1"
+PIPELINE_CACHE_VERSION = "2026-05-14-dark-noise-reference-factor-v1"
 # Conversion factor from distance in millimeters to time in picoseconds for this setup.
 MM_TO_PS = 6.6
 # Time per processed frame, in seconds:
@@ -188,6 +188,10 @@ class Meta:
     scan_velocity_mm_s: float = math.nan
     dark_noise_forced_by_tag: bool = False
     synthetic_conversion_factor_applied: bool = False
+    dark_noise_reference_run_name: str = ""
+    dark_noise_reference_run_folder: str = ""
+    dark_noise_reference_time_delta_s: float = math.nan
+    dark_noise_reference_factor: float = math.nan
 
 
 def pair_labels(pairs: np.ndarray) -> list[str]:
@@ -335,6 +339,20 @@ def metadata_payload(run_folder: Path) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
+def run_timestamp(run_folder: Path, payload: dict[str, object] | None = None) -> datetime:
+    payload = payload or {}
+    timestamp = payload.get("Timestamp")
+    if isinstance(timestamp, str):
+        try:
+            return datetime.fromisoformat(timestamp)
+        except ValueError:
+            pass
+    try:
+        return datetime.strptime(run_folder.name[:15], "%Y%m%d_%H%M%S")
+    except ValueError:
+        return datetime.fromtimestamp(run_folder.stat().st_mtime)
+
+
 def metadata_tag_values(payload: dict[str, object]) -> list[str]:
     raw_tags = payload.get("Tags")
     if isinstance(raw_tags, list):
@@ -344,18 +362,82 @@ def metadata_tag_values(payload: dict[str, object]) -> list[str]:
     return []
 
 
-def has_dark_noise_tag(run_folder: Path) -> bool:
-    tags = metadata_tag_values(metadata_payload(run_folder))
-    normalized_tags = {re.sub(r"[\s_-]+", " ", tag).strip() for tag in tags}
+def payload_has_dark_noise_tag(payload: dict[str, object]) -> bool:
+    normalized_tags = {re.sub(r"[\s_-]+", " ", tag).strip() for tag in metadata_tag_values(payload)}
     return DARK_NOISE_TAG_KEY in normalized_tags
+
+
+def payload_is_dark_noise(payload: dict[str, object]) -> bool:
+    if payload_has_dark_noise_tag(payload):
+        return True
+    physics = payload.get("PhysicsData")
+    physics = physics if isinstance(physics, dict) else {}
+    label = str(physics.get("DarkNoiseLabel", "")).strip().lower()
+    return label == DARK_NOISE_TAG_KEY or metadata_bool(physics.get("IsDarkNoiseRun"), False)
+
+
+def payload_reference_conversion_factor(payload: dict[str, object]) -> float:
+    return first_metadata_float(
+        payload,
+        [
+            ("PhysicsData", "ConversionFactor_V2_rad2"),
+            ("ConversionFactor_V2_rad2",),
+            ("PhysicsData", "ConversionFactor"),
+            ("ConversionFactor",),
+        ],
+    )
+
+
+def find_nearest_non_dark_reference(run_folder: Path) -> dict[str, object] | None:
+    target_payload = metadata_payload(run_folder)
+    target_time = run_timestamp(run_folder, target_payload)
+    best: dict[str, object] | None = None
+    best_delta = math.inf
+    parent = run_folder.parent
+    if not parent.is_dir():
+        return None
+
+    for candidate in parent.iterdir():
+        if not candidate.is_dir() or candidate == run_folder:
+            continue
+        payload = metadata_payload(candidate)
+        if not payload or payload_is_dark_noise(payload):
+            continue
+        factor = payload_reference_conversion_factor(payload)
+        if not np.isfinite(factor) or factor <= 0:
+            continue
+        candidate_time = run_timestamp(candidate, payload)
+        delta_s = abs((candidate_time - target_time).total_seconds())
+        if delta_s < best_delta:
+            best_delta = delta_s
+            best = {
+                "factor": factor,
+                "folder": str(candidate),
+                "name": candidate.name,
+                "timestamp": candidate_time.isoformat(timespec="seconds"),
+                "time_delta_s": delta_s,
+            }
+    return best
+
+
+def has_dark_noise_tag(run_folder: Path) -> bool:
+    return payload_has_dark_noise_tag(metadata_payload(run_folder))
 
 
 def apply_dark_noise_tag_power_estimate(run_folder: Path, meta: Meta) -> None:
     if not has_dark_noise_tag(run_folder):
         return
+    reference = find_nearest_non_dark_reference(run_folder)
     meta.p1_mw = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW
     meta.p2_mw = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW
-    meta.conversion_factor = DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2
+    if reference:
+        meta.conversion_factor = float(reference["factor"])
+        meta.dark_noise_reference_factor = float(reference["factor"])
+        meta.dark_noise_reference_run_name = str(reference["name"])
+        meta.dark_noise_reference_run_folder = str(reference["folder"])
+        meta.dark_noise_reference_time_delta_s = float(reference["time_delta_s"])
+    else:
+        meta.conversion_factor = DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2
     meta.dark_noise_forced_by_tag = True
     meta.synthetic_conversion_factor_applied = True
 
@@ -491,9 +573,14 @@ def is_dark_noise_run(meta: Meta) -> bool:
 
 def dark_noise_reason(meta: Meta) -> str | None:
     if meta.dark_noise_forced_by_tag:
+        if meta.dark_noise_reference_run_name:
+            return (
+                f"metadata tag {DARK_NOISE_TAG_NAME} uses nearest non-Dark Noise conversion factor "
+                f"{meta.conversion_factor:.6g} V^2/rad^2 from {meta.dark_noise_reference_run_name}"
+            )
         return (
             f"metadata tag {DARK_NOISE_TAG_NAME} uses {DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW:g} mW per detector port "
-            f"at {DARK_NOISE_SYNTHETIC_WAVELENGTH_NM:g} nm and synthetic conversion factor "
+            f"at {DARK_NOISE_SYNTHETIC_WAVELENGTH_NM:g} nm and fallback synthetic conversion factor "
             f"{DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2:.6g} V^2/rad^2"
         )
     powers = (meta.p1_mw, meta.p2_mw)
@@ -542,9 +629,15 @@ def delta_axis_label(display_in_v2: bool) -> str:
 def dark_noise_title_note(meta: Meta) -> str | None:
     if not meta.synthetic_conversion_factor_applied:
         return None
+    if meta.dark_noise_reference_run_name:
+        return (
+            f"{DARK_NOISE_TAG_NAME} tag: using nearest non-Dark Noise conversion factor "
+            f"{meta.conversion_factor:.6g} V^2/rad^2 from {meta.dark_noise_reference_run_name}; "
+            "results shown in artificial urad^2"
+        )
     return (
-        f"{DARK_NOISE_TAG_NAME} tag: synthetic conversion factor "
-        f"{DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2:.6g} V^2/rad^2 applied from "
+        f"{DARK_NOISE_TAG_NAME} tag: fallback synthetic conversion factor "
+        f"{meta.conversion_factor:.6g} V^2/rad^2 applied from "
         f"{DARK_NOISE_SYNTHETIC_WAVELENGTH_NM:g} nm, {DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW:g} mW per detector port; "
         "results shown in artificial urad^2"
     )
@@ -1752,17 +1845,39 @@ def update_metadata_json(run_folder: Path, meta: Meta) -> None:
         physics["OnSamplePower_mW"] = DARK_NOISE_TAG_POWER_ESTIMATE_MW
         physics["DarkNoiseTagPowerEstimate_mW"] = DARK_NOISE_TAG_POWER_ESTIMATE_MW
         physics["DarkNoiseTagPortPowerEstimate_mW"] = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW
-        physics["DarkNoiseSyntheticWavelength_nm"] = DARK_NOISE_SYNTHETIC_WAVELENGTH_NM
-        physics["DarkNoiseSyntheticDetectorResponsivity_A_per_W"] = DARK_NOISE_SYNTHETIC_RESPONSIVITY_A_PER_W
-        physics["DarkNoiseSyntheticRepRate_Hz"] = DARK_NOISE_SYNTHETIC_REP_RATE_HZ
-        physics["DarkNoiseSyntheticResponseTime_s"] = DARK_NOISE_SYNTHETIC_RESPONSE_TIME_S
         physics["SyntheticConversionFactorApplied"] = True
-        physics["SyntheticConversionFactor_V2_rad2"] = DARK_NOISE_SYNTHETIC_CONVERSION_FACTOR_V2_RAD2
+        physics["SyntheticConversionFactor_V2_rad2"] = meta.conversion_factor
+        physics["SyntheticConversionFactorSource"] = (
+            "nearest non-Dark Noise measurement" if meta.dark_noise_reference_run_name else "fallback synthetic estimate"
+        )
         physics["SyntheticConversionFactorNote"] = dark_noise_title_note(meta)
+        physics.pop("DarkNoiseReferenceRunFolder", None)
+        physics.pop("DarkNoiseReferenceRunName", None)
+        physics.pop("DarkNoiseReferenceTimeDelta_s", None)
+        physics.pop("DarkNoiseReferenceConversionFactor_V2_rad2", None)
+        if meta.dark_noise_reference_run_name:
+            physics["DarkNoiseReferenceRunFolder"] = meta.dark_noise_reference_run_folder
+            physics["DarkNoiseReferenceRunName"] = meta.dark_noise_reference_run_name
+            physics["DarkNoiseReferenceTimeDelta_s"] = meta.dark_noise_reference_time_delta_s
+            physics["DarkNoiseReferenceConversionFactor_V2_rad2"] = meta.dark_noise_reference_factor
+            physics.pop("DarkNoiseSyntheticWavelength_nm", None)
+            physics.pop("DarkNoiseSyntheticDetectorResponsivity_A_per_W", None)
+            physics.pop("DarkNoiseSyntheticRepRate_Hz", None)
+            physics.pop("DarkNoiseSyntheticResponseTime_s", None)
+        else:
+            physics["DarkNoiseSyntheticWavelength_nm"] = DARK_NOISE_SYNTHETIC_WAVELENGTH_NM
+            physics["DarkNoiseSyntheticDetectorResponsivity_A_per_W"] = DARK_NOISE_SYNTHETIC_RESPONSIVITY_A_PER_W
+            physics["DarkNoiseSyntheticRepRate_Hz"] = DARK_NOISE_SYNTHETIC_REP_RATE_HZ
+            physics["DarkNoiseSyntheticResponseTime_s"] = DARK_NOISE_SYNTHETIC_RESPONSE_TIME_S
     else:
         physics.pop("SyntheticConversionFactorApplied", None)
         physics.pop("SyntheticConversionFactor_V2_rad2", None)
+        physics.pop("SyntheticConversionFactorSource", None)
         physics.pop("SyntheticConversionFactorNote", None)
+        physics.pop("DarkNoiseReferenceRunFolder", None)
+        physics.pop("DarkNoiseReferenceRunName", None)
+        physics.pop("DarkNoiseReferenceTimeDelta_s", None)
+        physics.pop("DarkNoiseReferenceConversionFactor_V2_rad2", None)
         physics.pop("DarkNoiseSyntheticWavelength_nm", None)
         physics.pop("DarkNoiseSyntheticDetectorResponsivity_A_per_W", None)
         physics.pop("DarkNoiseSyntheticRepRate_Hz", None)

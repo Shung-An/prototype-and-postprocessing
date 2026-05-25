@@ -57,14 +57,25 @@ class LakeShore330Gpib:
     def query(self, command):
         return self.instrument.query(command).strip()
 
+    def _parse_numeric_reading(self, response):
+        try:
+            return float(response)
+        except (TypeError, ValueError):
+            return float("nan")
+
     def close(self):
         try:
             self.instrument.close()
         finally:
             self.resource_manager.close()
 
-    def prepare_kelvin_monitoring(self):
-        control_channel = self.query("CCHN?").strip().upper()
+    def prepare_kelvin_monitoring(self, control_channel=None):
+        if control_channel is not None:
+            control_channel = control_channel.upper()
+            self.command(f"CCHN {control_channel}")
+            time.sleep(0.55)
+        else:
+            control_channel = self.query("CCHN?").strip().upper()
         sample_channel = "B" if control_channel == "A" else "A"
         self.command("CUNI K")
         time.sleep(0.55)
@@ -77,21 +88,21 @@ class LakeShore330Gpib:
         channel = channel.upper()
         control_channel = self.query("CCHN?").strip().upper()
         if channel == control_channel:
-            return float(self.query("CDAT?"))
+            return self._parse_numeric_reading(self.query("CDAT?"))
         sample_channel = self.query("SCHN?").strip().upper()
         if sample_channel != channel:
             self.command(f"SCHN {channel}")
             time.sleep(0.55)
             self.command("SUNI K")
             time.sleep(0.55)
-        return float(self.query("SDAT?"))
+        return self._parse_numeric_reading(self.query("SDAT?"))
 
     def get_all_kelvin_reading(self):
         control_channel = self.query("CCHN?").strip().upper()
         sample_channel = self.query("SCHN?").strip().upper()
         readings = {"A": float("nan"), "B": float("nan")}
-        readings[control_channel] = float(self.query("CDAT?"))
-        readings[sample_channel] = float(self.query("SDAT?"))
+        readings[control_channel] = self._parse_numeric_reading(self.query("CDAT?"))
+        readings[sample_channel] = self._parse_numeric_reading(self.query("SDAT?"))
         return [readings["A"], readings["B"]]
 
     def get_all_sensor_reading(self):
@@ -104,7 +115,10 @@ class LakeShore330Gpib:
     def get_input_reading_status(self, _channel):
         return SimpleNamespace(status_available=False)
 
-    def set_control_setpoint(self, _output, value):
+    def set_control_setpoint(self, _output, value, control_channel=None):
+        if control_channel is not None:
+            self.command(f"CCHN {control_channel.upper()}")
+            time.sleep(0.55)
         self.command("CUNI K")
         time.sleep(0.55)
         self.command(f"SETP {value}")
@@ -151,7 +165,7 @@ class LakeShoreGUI:
         
         # Variables
         self.ls = None
-        self.gpib_resource_var = tk.StringVar(value="GPIB0::12::INSTR")
+        self.gpib_resource_var = tk.StringVar(value="GPIB0::17::INSTR")
         self.is_connected = False
         self.log_running = False
         self.csv_writer = None
@@ -164,6 +178,7 @@ class LakeShoreGUI:
         self.sensor_unit_names = []
         self.range_options = {}
         self.monitor_channel_var = None
+        self.control_channel_var = None
         self.channel_snapshot_var = None
         self.program_running = False
         self.program_points = []
@@ -173,6 +188,7 @@ class LakeShoreGUI:
         self.last_requested_setpoint_k = None
         self.max_heater_power_w = 50.0
         self.max_safe_temperature_k = 320.0
+        self.max_setpoint_temperature_k = 319.0
         self.power_estimate_low_temp_k = 294.0
         self.power_estimate_low_w = 0.0
         self.power_estimate_high_temp_k = 306.0
@@ -183,6 +199,10 @@ class LakeShoreGUI:
         self.overtemp_trip_active = False
         self.program_step_in_band_since = None
         self.program_step_quasi_eq_time_s = None
+        self.latest_temperatures = {}
+        self.last_update_error = None
+        self.lbl_operator_status = None
+        self.lbl_control_hint = None
         
         # Plot Data
         self.max_points = 150
@@ -250,11 +270,20 @@ class LakeShoreGUI:
         self.lbl_status.pack(pady=2)
         self.lbl_connection = ttk.Label(conn_frame, text="Instrument: Not connected", foreground="gray", wraplength=250, justify="left")
         self.lbl_connection.pack(fill="x", padx=5, pady=2)
+        self.lbl_operator_status = ttk.Label(
+            conn_frame,
+            text="Enter the Lake Shore 330 GPIB address, then connect.",
+            foreground="dim gray",
+            wraplength=280,
+            justify="left",
+        )
+        self.lbl_operator_status.pack(fill="x", padx=5, pady=(2, 5))
 
         # 2. MONITOR
         monitor_frame = ttk.LabelFrame(main_tab, text="Live Readings")
         monitor_frame.pack(fill="x", pady=5)
-        self.monitor_channel_var = tk.StringVar(value="A")
+        self.monitor_channel_var = tk.StringVar(value="B")
+        self.control_channel_var = tk.StringVar(value="B")
         self.lbl_temp = ttk.Label(monitor_frame, text="0.000 K", font=("Arial", 32, "bold"), foreground="navy")
         self.lbl_temp.pack(pady=5)
         monitor_row = ttk.Frame(monitor_frame)
@@ -264,10 +293,27 @@ class LakeShoreGUI:
             monitor_row, textvariable=self.monitor_channel_var, values=self.sensor_channels, state="readonly", width=6
         )
         self.combo_monitor_channel.pack(side="left", padx=5)
+        self.combo_monitor_channel.bind("<<ComboboxSelected>>", self.on_monitor_channel_change)
+        control_row = ttk.Frame(monitor_frame)
+        control_row.pack(pady=2)
+        ttk.Label(control_row, text="Control Channel:").pack(side="left")
+        self.combo_control_channel = ttk.Combobox(
+            control_row, textvariable=self.control_channel_var, values=self.sensor_channels, state="readonly", width=6
+        )
+        self.combo_control_channel.pack(side="left", padx=5)
+        self.combo_control_channel.bind("<<ComboboxSelected>>", self.on_control_channel_change)
         self.lbl_mode = ttk.Label(monitor_frame, text="Mode: Unknown", foreground="gray")
         self.lbl_mode.pack()
         self.lbl_heater = ttk.Label(monitor_frame, text="Heater: 0.0 % (0.00 W)")
         self.lbl_heater.pack(pady=2)
+        self.lbl_control_hint = ttk.Label(
+            monitor_frame,
+            text="Control channel B is selected by default. Use a channel with a real Kelvin reading before enabling the heater.",
+            foreground="dim gray",
+            wraplength=280,
+            justify="left",
+        )
+        self.lbl_control_hint.pack(fill="x", padx=5, pady=2)
         self.lbl_power_estimate = ttk.Label(
             monitor_frame,
             text="Estimated hold power @ target: -",
@@ -313,7 +359,7 @@ class LakeShoreGUI:
         ttk.Button(test_buttons, text="Snapshot All Channels", command=self.capture_channel_snapshot).pack(
             side="left", fill="x", expand=True
         )
-        ttk.Button(test_buttons, text="Set Main To Selected", command=self.sync_monitor_to_detector_channel).pack(
+        ttk.Button(test_buttons, text="Use Selected As Control", command=self.sync_monitor_to_detector_channel).pack(
             side="left", fill="x", expand=True, padx=(5, 0)
         )
         self.channel_snapshot_var = tk.StringVar(value="No snapshot yet.")
@@ -389,8 +435,19 @@ class LakeShoreGUI:
         r1.pack(fill="x", padx=5, pady=2)
         ttk.Label(r1, text="Setpoint (K):").pack(side="left")
         self.ent_setpoint = ttk.Entry(r1, width=8)
+        self.ent_setpoint.insert(0, "295")
         self.ent_setpoint.pack(side="left", padx=5)
         ttk.Button(r1, text="SET", width=6, command=self.set_temperature).pack(side="left")
+        ttk.Label(
+            pid_frame,
+            text=(
+                f"Safe command limit: {self.max_setpoint_temperature_k:.1f} K. "
+                f"Emergency heater trip: {self.max_safe_temperature_k:.1f} K."
+            ),
+            foreground="red",
+            wraplength=280,
+            justify="left",
+        ).pack(fill="x", padx=5, pady=(0, 4))
 
         # PID Fields
         r2 = ttk.Frame(pid_frame)
@@ -461,15 +518,24 @@ class LakeShoreGUI:
         self.lbl_program.pack(fill="x", padx=5, pady=3)
 
         # 4. MANUAL POWER
-        man_frame = ttk.LabelFrame(admin_tab, text="Manual Power")
+        man_frame = ttk.LabelFrame(admin_tab, text="Manual Output (Disabled)")
         man_frame.pack(fill="x", pady=5)
+        ttk.Label(
+            man_frame,
+            text="Direct manual heater output is disabled in this Model 330 UI. Use setpoint + heater range control.",
+            foreground="dim gray",
+            wraplength=280,
+            justify="left",
+        ).pack(fill="x", padx=5, pady=(4, 0))
         
         r3 = ttk.Frame(man_frame)
         r3.pack(fill="x", padx=5, pady=5)
         ttk.Label(r3, text="Manual Output (%):").pack(side="left")
         self.ent_manual = ttk.Entry(r3, width=8)
         self.ent_manual.pack(side="left", padx=5)
-        ttk.Button(r3, text="FORCE %", width=10, command=self.set_manual_out).pack(side="left")
+        self.ent_manual.config(state="disabled")
+        self.btn_manual_output = ttk.Button(r3, text="FORCE %", width=10, command=self.set_manual_out, state="disabled")
+        self.btn_manual_output.pack(side="left")
 
         # 5. CONFIG
         cfg_frame = ttk.LabelFrame(main_tab, text="Config")
@@ -480,7 +546,13 @@ class LakeShoreGUI:
         self.combo_range.current(0)
         self.combo_range.pack(fill="x", padx=5, pady=2)
         ttk.Button(cfg_frame, text="Set Range", command=self.set_range).pack(fill="x", padx=5, pady=2)
-        self.lbl_heater_limit = ttk.Label(cfg_frame, text=f"Temperature trip limit: {self.max_safe_temperature_k:.0f} K")
+        self.lbl_heater_limit = ttk.Label(
+            cfg_frame,
+            text=(
+                f"Max setpoint: {self.max_setpoint_temperature_k:.1f} K | "
+                f"Trip limit: {self.max_safe_temperature_k:.1f} K"
+            ),
+        )
         self.lbl_heater_limit.pack(anchor="w", padx=5, pady=2)
         
         ttk.Button(cfg_frame, text="Apply WARM Mode (Safe Presets)", style="Safe.TButton", command=self.apply_warm_mode).pack(fill="x", padx=5, pady=5)
@@ -530,10 +602,54 @@ class LakeShoreGUI:
         ]
         return ", ".join(active_flags) if active_flags else "OK"
 
+    def _set_operator_status(self, message, color="dim gray"):
+        if self.lbl_operator_status is not None:
+            self.lbl_operator_status.config(text=message, foreground=color)
+
+    def _set_control_hint(self, message, color="dim gray"):
+        if self.lbl_control_hint is not None:
+            self.lbl_control_hint.config(text=message, foreground=color)
+
+    def _update_temperature_color(self, temp):
+        if temp >= self.max_safe_temperature_k:
+            color = "red"
+        elif temp >= self.max_safe_temperature_k - 5:
+            color = "dark orange"
+        else:
+            color = "navy"
+        self.lbl_temp.config(foreground=color)
+
+    def _update_control_hint_from_readings(self):
+        channel = self.control_channel_var.get()
+        temp = self.latest_temperatures.get(channel)
+        if temp is None or not math.isfinite(temp):
+            self._set_control_hint(
+                f"Control channel {channel} has no valid Kelvin reading. Keep heater range OFF.",
+                "red",
+            )
+            return
+        if temp >= self.max_safe_temperature_k:
+            self._set_control_hint(
+                f"Control channel {channel} is {temp:.3f} K. Heater trip limit reached.",
+                "red",
+            )
+            return
+        if temp >= self.max_safe_temperature_k - 5:
+            self._set_control_hint(
+                f"Control channel {channel} is {temp:.3f} K. Close to the {self.max_safe_temperature_k:.1f} K trip limit.",
+                "dark orange",
+            )
+            return
+        self._set_control_hint(
+            f"Control channel {channel}: {temp:.3f} K. Ready for safe setpoint control.",
+            "dim gray",
+        )
+
     def _apply_setpoint(self, value):
+        self._validate_safe_temperature(value)
         self.last_requested_setpoint_k = value
         self.ls.set_manual_pid_mode()
-        self.ls.set_control_setpoint(1, value)
+        self.ls.set_control_setpoint(1, value, self.control_channel_var.get())
 
     def _enforce_heater_power_limit(self, heater_resistance=None):
         raise RuntimeError("The Model 330 heater-load/current limit must be configured on the instrument.")
@@ -569,7 +685,10 @@ class LakeShoreGUI:
         active_limit_w = self._active_heater_power_limit_w(active_range) if active_range is not None else None
         range_name = self._enum_text(active_range) if active_range is not None else self.combo_range.get()
 
-        label = f"Temperature trip limit: {self.max_safe_temperature_k:.0f} K"
+        label = (
+            f"Max setpoint: {self.max_setpoint_temperature_k:.1f} K | "
+            f"Trip limit: {self.max_safe_temperature_k:.1f} K"
+        )
         if active_limit_w is not None and range_name:
             label += f" | Estimated {range_name} full scale: {active_limit_w:.2f} W"
         self.lbl_heater_limit.config(text=label)
@@ -664,10 +783,20 @@ class LakeShoreGUI:
         return steps
 
     def _validate_safe_temperature(self, target_temperature):
-        if target_temperature > self.max_safe_temperature_k:
+        if target_temperature > self.max_setpoint_temperature_k:
             raise ValueError(
-                f"Temperature cannot exceed {self.max_safe_temperature_k:.0f} K."
+                f"Setpoint cannot exceed {self.max_setpoint_temperature_k:.1f} K "
+                f"(hardware trip limit {self.max_safe_temperature_k:.1f} K)."
             )
+
+    def _read_control_temperature(self):
+        if not self.is_connected:
+            return None
+        try:
+            value = self.ls.get_kelvin_reading(self.control_channel_var.get())
+            return value if math.isfinite(value) else None
+        except Exception:
+            return None
 
     def _trigger_overtemp_shutdown(self, measured_temperature):
         if self.overtemp_trip_active:
@@ -685,6 +814,10 @@ class LakeShoreGUI:
                 f"Program: Stopped at {measured_temperature:.3f} K "
                 f"(limit {self.max_safe_temperature_k:.0f} K)"
             )
+        )
+        self._set_operator_status(
+            f"Overtemperature shutdown at {measured_temperature:.3f} K. Heater range forced OFF.",
+            "red",
         )
         messagebox.showerror(
             "Overtemperature Shutdown",
@@ -722,6 +855,13 @@ class LakeShoreGUI:
             self.program_step_in_band_since = None
 
     def _set_heater_range_enum(self, heater_range):
+        if heater_range != LakeShore330Gpib.HeaterRange.OFF:
+            current_temp = self._read_control_temperature()
+            if current_temp is None:
+                raise ValueError("Cannot enable heater: control channel has no valid temperature reading.")
+            if current_temp >= self.max_safe_temperature_k:
+                self._trigger_overtemp_shutdown(current_temp)
+                raise ValueError(f"Cannot enable heater at {current_temp:.3f} K.")
         self.ls.set_heater_range(1, heater_range)
         range_names = {
             LakeShore330Gpib.HeaterRange.OFF: "OFF",
@@ -792,7 +932,7 @@ class LakeShoreGUI:
             )
         current_temp = None
         try:
-            current_temp = self.ls.get_kelvin_reading("A")
+            current_temp = self.ls.get_kelvin_reading(self.control_channel_var.get())
         except Exception:
             pass
         self._auto_adjust_program_range(current_temp, current_target)
@@ -872,6 +1012,7 @@ class LakeShoreGUI:
             temperatures = dict(zip(self.sensor_channels, kelvin_values))
         except Exception:
             pass
+        self.latest_temperatures = temperatures
 
         try:
             sensor_values = self.ls.get_all_sensor_reading()
@@ -887,6 +1028,8 @@ class LakeShoreGUI:
                 status_text = self._format_status(self.ls.get_input_reading_status(channel))
             except Exception:
                 status_text = "Unavailable"
+            if temp_value is None or not math.isfinite(temp_value):
+                status_text = "No valid Kelvin reading"
 
             self.sensor_rows[channel]["temp"].config(
                 text="-" if temp_value is None or not math.isfinite(temp_value) else f"{temp_value:.3f}"
@@ -896,11 +1039,61 @@ class LakeShoreGUI:
             )
             self.sensor_rows[channel]["status"].config(text=status_text)
 
+        self._update_control_hint_from_readings()
         monitored = temperatures.get(self.monitor_channel_var.get())
         return monitored if monitored is not None and math.isfinite(monitored) else None
 
+    def on_monitor_channel_change(self, _event=None):
+        self._set_operator_status(
+            f"Displaying channel {self.monitor_channel_var.get()}. Control channel is still {self.control_channel_var.get()}.",
+            "dim gray",
+        )
+
+    def on_control_channel_change(self, _event=None):
+        channel = self.control_channel_var.get()
+        self.monitor_channel_var.set(channel)
+
+        if not self.is_connected:
+            self._set_operator_status(
+                f"Control channel {channel} selected. It will be applied when you connect.",
+                "dim gray",
+            )
+            self._set_control_hint(
+                f"Control channel {channel} selected. Connect before enabling heater range.",
+                "dim gray",
+            )
+            return
+
+        try:
+            current_range = self._get_active_heater_range()
+            if current_range != LakeShore330Gpib.HeaterRange.OFF:
+                actual_channel = self.ls.query("CCHN?").strip().upper()
+                if actual_channel in self.sensor_channels:
+                    self.control_channel_var.set(actual_channel)
+                    self.monitor_channel_var.set(actual_channel)
+                messagebox.showwarning(
+                    "Control Channel",
+                    "Turn the heater range OFF before changing the control channel.",
+                )
+                self._set_operator_status(
+                    "Control channel was not changed because heater range is not OFF.",
+                    "red",
+                )
+                return
+            self.ls.prepare_kelvin_monitoring(channel)
+            self._update_sensor_readings()
+            self._set_operator_status(
+                f"Control channel changed to {channel}. Heater range is still OFF.",
+                "green",
+            )
+        except Exception as e:
+            self._set_operator_status(f"Control channel change failed: {e}", "red")
+            messagebox.showerror("Control Channel", str(e))
+
     def sync_monitor_to_detector_channel(self):
         self.monitor_channel_var.set(self.detector_channel_var.get())
+        self.control_channel_var.set(self.detector_channel_var.get())
+        self.on_control_channel_change()
 
     def capture_channel_snapshot(self):
         if not self.is_connected:
@@ -931,13 +1124,20 @@ class LakeShoreGUI:
         self.channel_snapshot_var.set(" | ".join(parts))
     
     def connect_instrument(self):
+        resource_name = self.gpib_resource_var.get().strip()
+        if not resource_name:
+            self._set_operator_status("Enter a GPIB resource before connecting.", "red")
+            messagebox.showerror("Connection", "Enter a GPIB resource before connecting.")
+            return
+
+        self._set_operator_status(f"Connecting to {resource_name}...", "blue")
         try:
-            self.ls = LakeShore330Gpib(self.gpib_resource_var.get().strip())
+            self.ls = LakeShore330Gpib(resource_name)
             idn = self.ls.query('*IDN?')
             if "MODEL330" not in idn.upper():
                 raise RuntimeError(f"Expected a Lake Shore Model 330 but found: {idn}")
             self.ls.configure_communications()
-            self.ls.prepare_kelvin_monitoring()
+            self.ls.prepare_kelvin_monitoring(self.control_channel_var.get())
             self.lbl_status.config(text="CONNECTED", foreground="green")
             self.lbl_connection.config(text=f"Instrument: {idn.strip()}", foreground="black")
             self.is_connected = True
@@ -946,6 +1146,10 @@ class LakeShoreGUI:
             self._update_sensor_metadata()
             self._update_sensor_readings()
             self.load_detector_config()
+            active_control_channel = self.ls.query("CCHN?").strip().upper()
+            if active_control_channel in self.sensor_channels:
+                self.control_channel_var.set(active_control_channel)
+                self.monitor_channel_var.set(active_control_channel)
             self._update_heater_limit_label()
             
             # Read PID
@@ -955,6 +1159,11 @@ class LakeShoreGUI:
                 self.ent_i.delete(0, tk.END); self.ent_i.insert(0, pid_str[1])
                 self.ent_d.delete(0, tk.END); self.ent_d.insert(0, pid_str[2])
             except: pass
+            self.last_update_error = None
+            self._set_operator_status(
+                f"Connected to Model 330. Control channel {self.control_channel_var.get()} is active.",
+                "green",
+            )
             
         except Exception as e:
             if self.ls is not None:
@@ -966,6 +1175,7 @@ class LakeShoreGUI:
             self.is_connected = False
             self.btn_connect.config(state="normal")
             self.ent_gpib_resource.config(state="normal")
+            self._set_operator_status(f"Connection failed: {e}", "red")
             messagebox.showerror("Error", str(e))
 
     def update_loop(self):
@@ -979,13 +1189,16 @@ class LakeShoreGUI:
                 htr = self.ls.get_heater_output_percent()
                 mode_txt = self.ls.get_tune_mode_text()
 
-                if temp is None:
+                if temp is None or not math.isfinite(temp):
                     temp = self.ls.get_kelvin_reading(self.monitor_channel_var.get())
+                if temp is None or not math.isfinite(temp):
+                    raise RuntimeError(f"Channel {self.monitor_channel_var.get()} has no valid Kelvin reading.")
                 if temp >= self.max_safe_temperature_k:
                     self._trigger_overtemp_shutdown(temp)
                 self._update_quasi_equilibrium_timer(temp)
                 self._advance_cycle_program()
                 self.lbl_temp.config(text=f"{temp:.3f} K")
+                self._update_temperature_color(temp)
                 heater_range = self._get_active_heater_range()
                 applied_power_w = self._heater_applied_power_w(htr, heater_range)
                 self.lbl_heater.config(text=f"Heater: {htr:.1f} % ({applied_power_w:.2f} W)")
@@ -1039,31 +1252,45 @@ class LakeShoreGUI:
                             quasi_eq_time,
                         ]
                     )
-            except: 
-                pass # Ignore glitches
+                self.last_update_error = None
+            except Exception as e:
+                error_text = str(e) or e.__class__.__name__
+                if error_text != self.last_update_error:
+                    self.last_update_error = error_text
+                    self._set_operator_status(f"Read/update failed: {error_text}", "red")
         
         # Schedule next loop
         if self.app_running:
             self.loop_id = self.root.after(1000, self.update_loop)
 
     def set_temperature(self):
-        if not self.is_connected: return
+        if not self.is_connected:
+            self._set_operator_status("Connect to the Model 330 before sending a setpoint.", "red")
+            return
         try:
             val = float(self.ent_setpoint.get())
             self._validate_safe_temperature(val)
             self.overtemp_trip_active = False
             self._apply_setpoint(val)
-            messagebox.showinfo("PID Mode", f"Setpoint: {val} K")
+            self._set_operator_status(
+                f"Setpoint {val:.3f} K sent on control channel {self.control_channel_var.get()}.",
+                "green",
+            )
         except Exception as e:
+            self._set_operator_status(f"Setpoint rejected: {e}", "red")
             messagebox.showerror("Error", str(e))
 
     def set_pid_values(self):
-        if not self.is_connected: return
+        if not self.is_connected:
+            self._set_operator_status("Connect to the Model 330 before updating PID.", "red")
+            return
         try:
             p, i, d = float(self.ent_p.get()), float(self.ent_i.get()), float(self.ent_d.get())
             self.ls.set_heater_pid(1, p, i, d)
-            messagebox.showinfo("Success", "PID Updated")
-        except: messagebox.showerror("Error", "Invalid Numbers")
+            self._set_operator_status(f"PID updated: P={p:g}, I={i:g}, D={d:g}.", "green")
+        except Exception:
+            self._set_operator_status("PID update failed: enter valid numbers.", "red")
+            messagebox.showerror("Error", "Invalid Numbers")
 
     def set_manual_out(self):
         messagebox.showinfo(
@@ -1072,13 +1299,30 @@ class LakeShoreGUI:
         )
 
     def set_range(self):
-        if self.is_connected:
-            rmap = {"OFF":0, "LOW":1, "MEDIUM":2, "HIGH":3}
-            self.ls.set_heater_range(1, rmap[self.combo_range.get()])
+        if not self.is_connected:
+            self._set_operator_status("Connect to the Model 330 before changing heater range.", "red")
+            return
+
+        rmap = {"OFF":0, "LOW":1, "MEDIUM":2, "HIGH":3}
+        selected_range = self.combo_range.get()
+        try:
+            if selected_range != "OFF":
+                current_temp = self._read_control_temperature()
+                if current_temp is None:
+                    raise ValueError("Cannot enable heater: control channel has no valid temperature reading.")
+                if current_temp >= self.max_safe_temperature_k:
+                    self._trigger_overtemp_shutdown(current_temp)
+                    raise ValueError(f"Cannot enable heater at {current_temp:.3f} K.")
+            self.ls.set_heater_range(1, rmap[selected_range])
             self._update_heater_limit_label()
+            self._set_operator_status(f"Heater range set to {selected_range}.", "green")
+        except Exception as e:
+            self._set_operator_status(f"Heater range change failed: {e}", "red")
+            messagebox.showerror("Heater Range", str(e))
 
     def start_cycle_program(self):
         if not self.is_connected:
+            self._set_operator_status("Connect to the Model 330 before starting a program.", "red")
             messagebox.showerror("Program", "Connect to the controller first.")
             return
         try:
@@ -1114,7 +1358,7 @@ class LakeShoreGUI:
             first_step = self.program_steps[0]
             self._apply_setpoint(first_step["target"])
             try:
-                current_temp = self.ls.get_kelvin_reading("A")
+                current_temp = self.ls.get_kelvin_reading(self.control_channel_var.get())
             except Exception:
                 current_temp = None
             self._auto_adjust_program_range(current_temp, first_step["target"])
@@ -1126,7 +1370,12 @@ class LakeShoreGUI:
                     f"Target {first_step['target']:.3f} K | {dwell_seconds:.0f} s remaining"
                 )
             )
+            self._set_operator_status(
+                f"Program started with {len(self.program_steps)} steps on control channel {self.control_channel_var.get()}.",
+                "green",
+            )
         except Exception as e:
+            self._set_operator_status(f"Program start failed: {e}", "red")
             messagebox.showerror("Program", str(e))
 
     def stop_cycle_program(self, completed=False):
@@ -1137,15 +1386,18 @@ class LakeShoreGUI:
         self.program_step_start_time = None
         self._reset_program_step_tracking()
         self.lbl_program.config(text="Program: Completed" if completed else "Program: Idle")
+        self._set_operator_status("Program completed." if completed else "Program stopped.", "dim gray")
 
     def apply_warm_mode(self):
-        if not self.is_connected: return
+        if not self.is_connected:
+            self._set_operator_status("Connect to the Model 330 before applying warm mode.", "red")
+            return
         self.ent_p.delete(0, tk.END); self.ent_p.insert(0, "50")
         self.ent_i.delete(0, tk.END); self.ent_i.insert(0, "10")
         self.ent_d.delete(0, tk.END); self.ent_d.insert(0, "0")
         self.set_pid_values()
         self.combo_range.current(1); self.set_range() 
-        messagebox.showinfo("Warm Mode", "Applied Safe Presets")
+        self._set_operator_status("Warm mode presets applied.", "green")
 
     def set_heater_load(self, ohm_setting):
         messagebox.showinfo(
@@ -1171,10 +1423,14 @@ class LakeShoreGUI:
                 ])
                 self.log_running = True
                 self.btn_log.config(text="STOP", foreground="red")
+                self._set_operator_status(f"Logging to {f}.", "green")
         else:
             self.log_running = False
-            self.log_file.close()
+            if self.log_file is not None:
+                self.log_file.close()
+                self.log_file = None
             self.btn_log.config(text="START LOG", foreground="black")
+            self._set_operator_status("Logging stopped.", "dim gray")
 
     def on_close(self):
         """Optimized Shutdown Sequence"""
