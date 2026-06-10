@@ -1,0 +1,4 @@
+run_name,label,after_fir_psd_db_at_76mhz,after_fir_max_psd_db_in_window,after_fir_max_offset_hz,after_fir_median_psd_db_in_window,before_fir_psd_db_at_76mhz,two_tap_fir_rejection_db_at_76mhz
+20260515_092941,Dark noise reference,-202.747482078,-95.869524694,92773.4375,-103.167991165,-42.7474820776,-160
+20260526_141535,"highpass filter, without SHG, automatic mode; tags: Alignment",-111.059703631,-61.5277174855,-144.958496094,-96.7093826108,48.9402963692,-160
+20260526_142458,"highpass filter, without SHG, manual mode; tags: Alignment",-117.435730663,-67.9045095538,-144.958496094,-115.885105349,42.5642693369,-160

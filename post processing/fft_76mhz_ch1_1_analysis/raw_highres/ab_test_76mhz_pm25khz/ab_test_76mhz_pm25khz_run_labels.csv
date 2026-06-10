@@ -1,0 +1,8 @@
+run_name,label,group,wavelength_nm,mode,note
+20260515_092941,Dark noise,A0 reference,none,dark,"Dark-noise reference, no laser signal"
+20260515_133100,Flint2 only @1030,A laser-only,1030,laser only,Flint2 laser-only reference
+20260521_162959,OPO/highpass @780,B OPO 780,780,highpass,Using the 20260521 vacuum highpass run per previous comparison
+20260526_141535,OPO @1560 auto,C 1560 auto/manual,1560,auto,Raw-backed 1560 nm automatic measurement
+20260526_143329,OPO @1560 manual,C 1560 auto/manual,1560,manual,"Raw-backed 1560 nm manual measurement, replacement for the earlier incorrect manual selection"
+20260526_150209,OPO @1600 manual A,D 1600 manual,1600,manual,"Raw-backed 1600 nm highpass without SHG, manual mode"
+20260526_162112,OPO @1600 manual B,D 1600 manual,1600,manual,"Raw-backed 1600 nm highpass without SHG, manual repeat; no raw-backed 1600 auto was found"

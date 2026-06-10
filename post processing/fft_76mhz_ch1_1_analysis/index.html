@@ -1,0 +1,889 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch1-1 76 MHz FFT Analysis Browser</title>
+  <style>
+    :root {
+      --bg: #f7f7f4;
+      --panel: #ffffff;
+      --text: #202124;
+      --muted: #60646c;
+      --line: #d9d9d2;
+      --accent: #1f6f8b;
+      --accent-soft: #e8f2f7;
+      --code: #f0f0eb;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }
+
+    header {
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+
+    .wrap {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    .hero {
+      padding: 28px 0 22px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(1.75rem, 2.4vw, 2.4rem);
+      font-weight: 720;
+    }
+
+    .subtitle {
+      max-width: 860px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 1rem;
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      padding: 14px 0 18px;
+      flex-wrap: wrap;
+    }
+
+    input[type="search"] {
+      width: min(520px, 100%);
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--text);
+      font: inherit;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 3px 9px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: #17485d;
+      font-size: 0.88rem;
+      white-space: nowrap;
+    }
+
+    main {
+      padding: 24px 0 36px;
+    }
+
+    section {
+      margin: 0 0 30px;
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 1.18rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .card a {
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 650;
+    }
+
+    .card a:hover,
+    .file-table a:hover {
+      text-decoration: underline;
+    }
+
+    .thumb {
+      display: block;
+      width: 100%;
+      aspect-ratio: 16 / 10;
+      object-fit: contain;
+      background: #fbfbf8;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .card-body {
+      padding: 12px;
+    }
+
+    .card-body p {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 0.93rem;
+    }
+
+    .links {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 8px;
+    }
+
+    .link-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .link-row a {
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 620;
+      overflow-wrap: anywhere;
+    }
+
+    .tag {
+      flex: 0 0 auto;
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+      background: var(--code);
+      border-radius: 6px;
+      padding: 2px 6px;
+    }
+
+    .note {
+      margin: 0 0 12px;
+      color: var(--muted);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    th,
+    td {
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #eeeeea;
+      font-size: 0.9rem;
+    }
+
+    td {
+      font-size: 0.93rem;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    code {
+      padding: 2px 4px;
+      border-radius: 4px;
+      background: var(--code);
+      font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+      font-size: 0.92em;
+    }
+
+    .file-table a {
+      color: var(--accent);
+      text-decoration: none;
+      overflow-wrap: anywhere;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    @media (max-width: 700px) {
+      .wrap {
+        width: min(100% - 20px, 1180px);
+      }
+
+      .link-row {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      table,
+      thead,
+      tbody,
+      tr,
+      th,
+      td {
+        display: block;
+      }
+
+      thead {
+        display: none;
+      }
+
+      tr {
+        border-bottom: 1px solid var(--line);
+      }
+
+      td {
+        border-bottom: 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap hero">
+      <h1>Ch1-1 76 MHz FFT Analysis Browser</h1>
+      <p class="subtitle">
+        One-page entry point for the raw-backed high-resolution FFT results, 2-tap FIR estimates,
+        DC-to-25 kHz and DC-to-100 kHz zooms, older FFT references, scripts, logs, and measurement notes.
+      </p>
+      <div class="toolbar">
+        <input id="search" type="search" placeholder="Search files, runs, plots, FIR, highpass, OPO, dark..." aria-label="Search analysis links">
+        <span class="pill">center: 76 MHz</span>
+        <span class="pill">bin: 144.958 Hz</span>
+        <span class="pill">raw file: Data_1_1.bin ch1</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section data-search-block>
+      <h2>Start Here</h2>
+      <div class="links">
+        <div class="link-row searchable" data-search-text="readme overview documentation folder layout reproduce">
+          <a href="README.md">README and reproduction notes</a>
+          <span class="tag">md</span>
+        </div>
+        <div class="link-row searchable" data-search-text="metadata notes measurement raw backed run note highpass opo dark flint2">
+          <a href="../raw_backed_fft_measurement_notes.csv">Raw-backed measurement notes</a>
+          <span class="tag">csv</span>
+        </div>
+        <div class="link-row searchable" data-search-text="ab test focused 76 mhz plus minus 25 khz dark flint2 780 1560 1600 auto manual summary">
+          <a href="raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_summary.csv">Focused AB test summary, +/-25 kHz</a>
+          <span class="tag">csv</span>
+        </div>
+        <div class="link-row searchable" data-search-text="ab test raw db vs dark plot 76 mhz plus minus 25 khz dark flint2 780 1560 1600">
+          <a href="raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_raw_db_vs_dark.png">Focused AB plot, raw dB vs dark</a>
+          <span class="tag">png</span>
+        </div>
+        <div class="link-row searchable" data-search-text="selected summary five run dark flint2 opo highpass db vs dark">
+          <a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_summary.csv">Current selected +/-100 kHz summary</a>
+          <span class="tag">csv</span>
+        </div>
+        <div class="link-row searchable" data-search-text="after fir residual selected summary highpass opo dark flint2">
+          <a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_after_2tap_fir_summary.csv">After 2-tap FIR residual summary</a>
+          <span class="tag">csv</span>
+        </div>
+      </div>
+    </section>
+
+    <section data-search-block>
+      <h2>New Measurement Notes</h2>
+      <p class="note">Raw-backed measurements are now treated as FFT-analysis-capable with mode <code>raw_fft_candidate</code>, even when they only have <code>Data_*.bin</code> files for later customized FFT analysis. The 1600 nm raw-backed pair is included here.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Run</th>
+            <th>Meaning</th>
+            <th>Key Reminder</th>
+            <th>Folder</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="searchable" data-search-text="20260526_162112 1600 nm raw fft candidate highpass filter without shg manual pdb230c ingaas motor 159 -656 shot noise 0.79 custom fft">
+            <td><code>20260526_162112</code></td>
+            <td>Vacuum highpass filter without SHG, manual</td>
+            <td><code>1600 nm</code>, PDB230C/InGaAs, scan <code>0.1 mm/s</code>, motor1 <code>159</code>, motor2 <code>-656</code>, shot noise <code>0.79 urad^2/rtHz</code>, raw-backed <code>16.38 GB</code>, mode <code>raw_fft_candidate</code></td>
+            <td><a href="file:///D:/Quantum%20Squeezing%20Project/DataFiles/20260526_162112/">DataFiles/20260526_162112</a></td>
+          </tr>
+          <tr class="searchable" data-search-text="20260526_150209 1600 nm raw fft candidate low frequency highpass filter without shg manual mode pdb230c ingaas motor -162 -282 shot noise 1.12 custom fft">
+            <td><code>20260526_150209</code></td>
+            <td>Vacuum highpass filter without SHG, manual mode</td>
+            <td><code>1600 nm</code>, PDB230C/InGaAs, scan <code>0.1 mm/s</code>, motor1 <code>-162</code>, motor2 <code>-282</code>, shot noise <code>1.12 urad^2/rtHz</code>, raw-backed <code>16.38 GB</code>, modes <code>low_frequency</code>, <code>raw_fft_candidate</code></td>
+            <td><a href="file:///D:/Quantum%20Squeezing%20Project/DataFiles/20260526_150209/">DataFiles/20260526_150209</a></td>
+          </tr>
+          <tr class="searchable" data-search-text="20260526_142458 today pending highpass filter without shg manual mode 1560 nm pdb230c ingaas motor 146 -53 shot noise 1.16">
+            <td><code>20260526_142458</code></td>
+            <td>Vacuum highpass filter without SHG, manual mode</td>
+            <td><code>1560 nm</code>, PDB230C/InGaAs, scan <code>0.1 mm/s</code>, motor1 <code>146</code>, motor2 <code>-53</code>, shot noise <code>1.16 urad^2/rtHz</code>, raw-backed <code>16.38 GB</code></td>
+            <td><a href="file:///D:/Quantum%20Squeezing%20Project/DataFiles/20260526_142458/">DataFiles/20260526_142458</a></td>
+          </tr>
+          <tr class="searchable" data-search-text="20260526_141535 today pending highpass filter without shg automatic mode 1560 nm pdb230c ingaas motor 96 -7 shot noise 1.11">
+            <td><code>20260526_141535</code></td>
+            <td>Vacuum highpass filter without SHG, automatic mode</td>
+            <td><code>1560 nm</code>, PDB230C/InGaAs, scan <code>0.1 mm/s</code>, motor1 <code>96</code>, motor2 <code>-7</code>, shot noise <code>1.11 urad^2/rtHz</code>, raw-backed <code>16.31 GB</code></td>
+            <td><a href="file:///D:/Quantum%20Squeezing%20Project/DataFiles/20260526_141535/">DataFiles/20260526_141535</a></td>
+          </tr>
+          <tr class="searchable" data-search-text="20260526_143329 today highpass filter without shg manual mode 1560 nm pdb230c ingaas motor -106 -221 shot noise 1.12">
+            <td><code>20260526_143329</code></td>
+            <td>Vacuum highpass filter without SHG, manual mode</td>
+            <td><code>1560 nm</code>, PDB230C/InGaAs, scan <code>0.1 mm/s</code>, motor1 <code>-106</code>, motor2 <code>-221</code>, shot noise <code>1.12 urad^2/rtHz</code>, raw-backed <code>16.38 GB</code></td>
+            <td><a href="file:///D:/Quantum%20Squeezing%20Project/DataFiles/20260526_143329/">DataFiles/20260526_143329</a></td>
+          </tr>
+          <tr class="searchable" data-search-text="20260526_143004 today highpass filter without shg manual mode 1560 nm pdb230c ingaas motor 202 -149 shot noise 1.20">
+            <td><code>20260526_143004</code></td>
+            <td>Vacuum highpass filter without SHG, manual mode</td>
+            <td><code>1560 nm</code>, PDB230C/InGaAs, scan <code>0.1 mm/s</code>, motor1 <code>202</code>, motor2 <code>-149</code>, shot noise <code>1.20 urad^2/rtHz</code>, raw-backed <code>7.50 GB</code></td>
+            <td><a href="file:///D:/Quantum%20Squeezing%20Project/DataFiles/20260526_143004/">DataFiles/20260526_143004</a></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section data-search-block>
+      <h2>Focused AB Test, +/-25 kHz</h2>
+      <p class="note">Requested comparison: dark noise, Flint2-only, OPO/highpass at <code>780 nm</code>, OPO at <code>1560 nm</code> auto/manual, and OPO at <code>1600 nm</code>. No raw-backed <code>1600 nm</code> auto run was found, so two manual 1600 nm runs are shown as A/B repeats.</p>
+      <div class="grid">
+        <article class="card searchable" data-search-text="ab test 76 mhz plus minus 25 khz raw db vs dark dark flint2 780 1560 auto manual 1600">
+          <a href="raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_raw_db_vs_dark.png">
+            <img class="thumb" src="raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_raw_db_vs_dark.png" alt="Focused AB test raw dB relative to dark">
+          </a>
+          <div class="card-body">
+            <a href="raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_raw_db_vs_dark.png">Raw PSD relative to dark, +/-25 kHz</a>
+            <p>Best first view for comparing the 76 MHz peak height and nearby skirt in dB.</p>
+          </div>
+        </article>
+        <article class="card searchable" data-search-text="ab test 76 mhz plus minus 25 khz raw db absolute dark flint2 780 1560 1600">
+          <a href="raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_raw_db.png">
+            <img class="thumb" src="raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_raw_db.png" alt="Focused AB test raw dB">
+          </a>
+          <div class="card-body">
+            <a href="raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_raw_db.png">Raw PSD, +/-25 kHz</a>
+            <p>Absolute PSD in dB counts^2/Hz for the same seven raw-backed runs.</p>
+          </div>
+        </article>
+        <article class="card searchable" data-search-text="ab test after 2 tap fir 76 mhz plus minus 25 khz residual dark flint2 780 1560 1600">
+          <a href="raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_after_2tap_fir_db.png">
+            <img class="thumb" src="raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_after_2tap_fir_db.png" alt="Focused AB test after 2-tap FIR">
+          </a>
+          <div class="card-body">
+            <a href="raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_after_2tap_fir_db.png">After 2-tap FIR, +/-25 kHz</a>
+            <p>Estimated residual spectrum after the ideal 8-sample notch centered at 76 MHz.</p>
+          </div>
+        </article>
+        <article class="card searchable" data-search-text="ab test dc to 25 khz positive offset raw db vs dark dark flint2 780 1560 1600">
+          <a href="raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_dc_to_25khz_positive_offset_raw_db_vs_dark.png">
+            <img class="thumb" src="raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_dc_to_25khz_positive_offset_raw_db_vs_dark.png" alt="Focused AB test DC to 25 kHz raw dB relative to dark">
+          </a>
+          <div class="card-body">
+            <a href="raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_dc_to_25khz_positive_offset_raw_db_vs_dark.png">DC to 25 kHz offset, raw dB vs dark</a>
+            <p>Positive-offset zoom from the carrier for the same AB set.</p>
+          </div>
+        </article>
+      </div>
+      <div class="links" style="margin-top: 12px;">
+        <div class="link-row searchable" data-search-text="ab test summary csv dB vs dark after fir 76 mhz">
+          <a href="raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_summary.csv">AB test summary</a>
+          <span class="tag">csv</span>
+        </div>
+        <div class="link-row searchable" data-search-text="ab test run labels csv dark flint2 780 1560 1600 auto manual">
+          <a href="raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_run_labels.csv">AB test run labels</a>
+          <span class="tag">csv</span>
+        </div>
+        <div class="link-row searchable" data-search-text="ab test folded absolute offset dc 25 khz raw db vs dark">
+          <a href="raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_dc_to_25khz_folded_abs_offset_raw_db_vs_dark.png">Folded DC-to-25 kHz, raw dB vs dark</a>
+          <span class="tag">png</span>
+        </div>
+        <div class="link-row searchable" data-search-text="ab test dc 25 khz after 2 tap fir positive offset">
+          <a href="raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_dc_to_25khz_positive_offset_after_2tap_fir_db.png">DC-to-25 kHz after 2-tap FIR</a>
+          <span class="tag">png</span>
+        </div>
+      </div>
+      <table style="margin-top: 12px;">
+        <thead>
+          <tr>
+            <th>Run</th>
+            <th>Label</th>
+            <th>Mode</th>
+            <th>dB vs dark at 76 MHz</th>
+            <th>Max residual after FIR</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="searchable" data-search-text="20260515_092941 dark noise ab test">
+            <td><code>20260515_092941</code></td>
+            <td>Dark noise</td>
+            <td>dark</td>
+            <td><code>0.00 dB</code></td>
+            <td><code>-108.26 dB</code></td>
+          </tr>
+          <tr class="searchable" data-search-text="20260515_133100 flint2 only 1030 ab test">
+            <td><code>20260515_133100</code></td>
+            <td>Flint2 only @1030</td>
+            <td>laser only</td>
+            <td><code>96.57 dB</code></td>
+            <td><code>-56.64 dB</code></td>
+          </tr>
+          <tr class="searchable" data-search-text="20260521_162959 opo highpass 780 ab test">
+            <td><code>20260521_162959</code></td>
+            <td>OPO/highpass @780</td>
+            <td>highpass</td>
+            <td><code>97.76 dB</code></td>
+            <td><code>-55.46 dB</code></td>
+          </tr>
+          <tr class="searchable" data-search-text="20260526_141535 1560 auto ab test">
+            <td><code>20260526_141535</code></td>
+            <td>OPO @1560 auto</td>
+            <td>auto</td>
+            <td><code>91.69 dB</code></td>
+            <td><code>-61.53 dB</code></td>
+          </tr>
+          <tr class="searchable" data-search-text="20260526_143329 1560 manual ab test replacement">
+            <td><code>20260526_143329</code></td>
+            <td>OPO @1560 manual</td>
+            <td>manual</td>
+            <td><code>99.88 dB</code></td>
+            <td><code>-53.34 dB</code></td>
+          </tr>
+          <tr class="searchable" data-search-text="20260526_150209 1600 manual a ab test">
+            <td><code>20260526_150209</code></td>
+            <td>OPO @1600 manual A</td>
+            <td>manual</td>
+            <td><code>93.20 dB</code></td>
+            <td><code>-60.02 dB</code></td>
+          </tr>
+          <tr class="searchable" data-search-text="20260526_162112 1600 manual b ab test raw backed no auto found">
+            <td><code>20260526_162112</code></td>
+            <td>OPO @1600 manual B</td>
+            <td>manual</td>
+            <td><code>92.00 dB</code></td>
+            <td><code>-61.21 dB</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section data-search-block>
+      <h2>Current Comparison Plots</h2>
+      <p class="note">These include dark noise, Flint2, OPO single point, OPO scanning, and the May 21 vacuum highpass alignment run.</p>
+      <div class="grid">
+        <article class="card searchable" data-search-text="no fir dc 100 khz positive offset current comparison highpass opo flint2 dark">
+          <a href="raw_highres/ch1_1_76mhz_no_fir_dc_to_100khz_positive_offset.png">
+            <img class="thumb" src="raw_highres/ch1_1_76mhz_no_fir_dc_to_100khz_positive_offset.png" alt="No FIR DC to 100 kHz positive offset plot">
+          </a>
+          <div class="card-body">
+            <a href="raw_highres/ch1_1_76mhz_no_fir_dc_to_100khz_positive_offset.png">No FIR, DC to 100 kHz offset</a>
+            <p>Positive-offset zoom around the 76 MHz carrier before the 2-tap FIR estimate.</p>
+          </div>
+        </article>
+        <article class="card searchable" data-search-text="after 2 tap fir dc 100 khz positive offset residual current comparison highpass opo flint2 dark">
+          <a href="raw_highres/ch1_1_76mhz_after_2tap_fir_dc_to_100khz_positive_offset.png">
+            <img class="thumb" src="raw_highres/ch1_1_76mhz_after_2tap_fir_dc_to_100khz_positive_offset.png" alt="After FIR DC to 100 kHz positive offset plot">
+          </a>
+          <div class="card-body">
+            <a href="raw_highres/ch1_1_76mhz_after_2tap_fir_dc_to_100khz_positive_offset.png">After 2-tap FIR, DC to 100 kHz offset</a>
+            <p>Estimated residual spectrum after applying the ideal 8-sample 2-tap notch.</p>
+          </div>
+        </article>
+        <article class="card searchable" data-search-text="plus minus 100 khz selected db with 2 tap fir rejection curve highpass opo flint2 dark">
+          <a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_db_with_2tap_fir.png">
+            <img class="thumb" src="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_db_with_2tap_fir.png" alt="+/-100 kHz selected spectra with FIR rejection line">
+          </a>
+          <div class="card-body">
+            <a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_db_with_2tap_fir.png">+/-100 kHz spectra with FIR rejection line</a>
+            <p>Raw high-resolution spectra in dB, overlaid with the 2-tap FIR rejection curve.</p>
+          </div>
+        </article>
+        <article class="card searchable" data-search-text="after 2 tap fir plus minus 100 khz selected db residual highpass opo flint2 dark">
+          <a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_after_2tap_fir_db.png">
+            <img class="thumb" src="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_after_2tap_fir_db.png" alt="+/-100 kHz selected spectra after FIR">
+          </a>
+          <div class="card-body">
+            <a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_after_2tap_fir_db.png">+/-100 kHz after 2-tap FIR</a>
+            <p>Estimated residual after the FIR, using the same selected measurement set.</p>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section data-search-block>
+      <h2>Pending May 26 PSD</h2>
+      <p class="note">High-resolution raw PSD for the pending pair, centered at <code>76 MHz</code> with a <code>+/-100 kHz</code> window. Dark reference is included for dB comparison.</p>
+      <div class="grid">
+        <article class="card searchable" data-search-text="pending 20260526 141535 142458 76 mhz plus minus 100 khz raw db with 2 tap fir">
+          <a href="raw_highres/pending_20260526/ch1_1_76mhz_pm100khz_raw_highres_selected_db_with_2tap_fir.png">
+            <img class="thumb" src="raw_highres/pending_20260526/ch1_1_76mhz_pm100khz_raw_highres_selected_db_with_2tap_fir.png" alt="Pending May 26 raw dB plot with 2-tap FIR rejection">
+          </a>
+          <div class="card-body">
+            <a href="raw_highres/pending_20260526/ch1_1_76mhz_pm100khz_raw_highres_selected_db_with_2tap_fir.png">Pending pair, raw dB with FIR curve</a>
+            <p>Dark reference plus the two pending highpass-without-SHG acquisitions.</p>
+          </div>
+        </article>
+        <article class="card searchable" data-search-text="pending 20260526 141535 142458 76 mhz plus minus 100 khz after 2 tap fir residual">
+          <a href="raw_highres/pending_20260526/ch1_1_76mhz_pm100khz_raw_highres_selected_after_2tap_fir_db.png">
+            <img class="thumb" src="raw_highres/pending_20260526/ch1_1_76mhz_pm100khz_raw_highres_selected_after_2tap_fir_db.png" alt="Pending May 26 after 2-tap FIR residual">
+          </a>
+          <div class="card-body">
+            <a href="raw_highres/pending_20260526/ch1_1_76mhz_pm100khz_raw_highres_selected_after_2tap_fir_db.png">Pending pair, after 2-tap FIR</a>
+            <p>Estimated residual spectrum after applying the ideal 8-sample 2-tap notch.</p>
+          </div>
+        </article>
+      </div>
+      <div class="links" style="margin-top: 12px;">
+        <div class="link-row searchable" data-search-text="pending 20260526 selected summary csv psd at 76 mhz db vs dark">
+          <a href="raw_highres/pending_20260526/ch1_1_76mhz_pm100khz_raw_highres_selected_summary.csv">Pending selected summary</a>
+          <span class="tag">csv</span>
+        </div>
+        <div class="link-row searchable" data-search-text="pending 20260526 selected spectrum csv">
+          <a href="raw_highres/pending_20260526/ch1_1_76mhz_pm100khz_raw_highres_selected_spectrum.csv">Pending selected spectrum</a>
+          <span class="tag">csv</span>
+        </div>
+        <div class="link-row searchable" data-search-text="pending 20260526 after fir summary csv">
+          <a href="raw_highres/pending_20260526/ch1_1_76mhz_pm100khz_raw_highres_selected_after_2tap_fir_summary.csv">Pending after-FIR summary</a>
+          <span class="tag">csv</span>
+        </div>
+        <div class="link-row searchable" data-search-text="pending 20260526 after fir spectrum csv">
+          <a href="raw_highres/pending_20260526/ch1_1_76mhz_pm100khz_raw_highres_selected_after_2tap_fir_spectrum.csv">Pending after-FIR spectrum</a>
+          <span class="tag">csv</span>
+        </div>
+      </div>
+    </section>
+
+    <section data-search-block>
+      <h2>+800 kHz Offset Window</h2>
+      <p class="note">Raw-backed comparison centered at <code>76.8 MHz</code>, equivalent to <code>+800 kHz</code> offset from the 76 MHz carrier, with a <code>+/-100 kHz</code> window.</p>
+      <div class="grid">
+        <article class="card searchable" data-search-text="800 khz offset 76.8 mhz plus minus 100 khz raw db highpass opo flint2 dark">
+          <a href="raw_highres/offset_800khz/ch1_1_76mhz_offset800khz_pm100khz_selected_raw_db.png">
+            <img class="thumb" src="raw_highres/offset_800khz/ch1_1_76mhz_offset800khz_pm100khz_selected_raw_db.png" alt="+800 kHz offset raw dB plot">
+          </a>
+          <div class="card-body">
+            <a href="raw_highres/offset_800khz/ch1_1_76mhz_offset800khz_pm100khz_selected_raw_db.png">+800 kHz offset, raw dB</a>
+            <p>Selected five-run comparison before the 2-tap FIR estimate.</p>
+          </div>
+        </article>
+        <article class="card searchable" data-search-text="800 khz offset 76.8 mhz plus minus 100 khz after 2 tap fir highpass opo flint2 dark">
+          <a href="raw_highres/offset_800khz/ch1_1_76mhz_offset800khz_pm100khz_selected_after_2tap_fir_db.png">
+            <img class="thumb" src="raw_highres/offset_800khz/ch1_1_76mhz_offset800khz_pm100khz_selected_after_2tap_fir_db.png" alt="+800 kHz offset after 2-tap FIR plot">
+          </a>
+          <div class="card-body">
+            <a href="raw_highres/offset_800khz/ch1_1_76mhz_offset800khz_pm100khz_selected_after_2tap_fir_db.png">+800 kHz offset, after 2-tap FIR</a>
+            <p>The FIR gives about -29.6 dB attenuation at this offset from the notch.</p>
+          </div>
+        </article>
+      </div>
+      <div class="links" style="margin-top: 12px;">
+        <div class="link-row searchable" data-search-text="800 khz offset selected spectrum csv 76.8 mhz">
+          <a href="raw_highres/offset_800khz/ch1_1_76mhz_offset800khz_pm100khz_selected_spectrum.csv">+800 kHz selected spectrum</a>
+          <span class="tag">csv</span>
+        </div>
+        <div class="link-row searchable" data-search-text="800 khz offset selected summary csv 76.8 mhz">
+          <a href="raw_highres/offset_800khz/ch1_1_76mhz_offset800khz_pm100khz_selected_summary.csv">+800 kHz selected summary</a>
+          <span class="tag">csv</span>
+        </div>
+      </div>
+    </section>
+
+    <section data-search-block>
+      <h2>Full Spectrum</h2>
+      <p class="note">Selected five-run raw spectrum from <code>0</code> to Nyquist, <code>304 MHz</code>, using the same <code>4,194,304</code>-point FFT and 32-frame averaging.</p>
+      <div class="grid">
+        <article class="card searchable" data-search-text="full spectrum semilogy 0 304 mhz raw selected highpass opo flint2 dark">
+          <a href="raw_highres/full_spectrum/ch1_1_full_spectrum_selected_semilogy.png">
+            <img class="thumb" src="raw_highres/full_spectrum/ch1_1_full_spectrum_selected_semilogy.png" alt="Full raw spectrum semilogy plot">
+          </a>
+          <div class="card-body">
+            <a href="raw_highres/full_spectrum/ch1_1_full_spectrum_selected_semilogy.png">Full spectrum, semilogy</a>
+            <p>Frequency axis from 0 to 304 MHz, PSD on a log axis.</p>
+          </div>
+        </article>
+        <article class="card searchable" data-search-text="full spectrum loglog binned 0 304 mhz raw selected highpass opo flint2 dark">
+          <a href="raw_highres/full_spectrum/ch1_1_full_spectrum_selected_loglog.png">
+            <img class="thumb" src="raw_highres/full_spectrum/ch1_1_full_spectrum_selected_loglog.png" alt="Full raw spectrum log-log plot">
+          </a>
+          <div class="card-body">
+            <a href="raw_highres/full_spectrum/ch1_1_full_spectrum_selected_loglog.png">Full spectrum, log-log</a>
+            <p>Log-binned view to make low-frequency structure and high-frequency peaks visible together.</p>
+          </div>
+        </article>
+      </div>
+      <div class="links" style="margin-top: 12px;">
+        <div class="link-row searchable" data-search-text="full spectrum selected csv full resolution 2097153 bins">
+          <a href="raw_highres/full_spectrum/ch1_1_full_spectrum_selected.csv">Full-resolution spectrum CSV</a>
+          <span class="tag">csv</span>
+        </div>
+        <div class="link-row searchable" data-search-text="full spectrum selected summary csv 76 mhz 76.8 mhz median max">
+          <a href="raw_highres/full_spectrum/ch1_1_full_spectrum_selected_summary.csv">Full-spectrum summary</a>
+          <span class="tag">csv</span>
+        </div>
+      </div>
+    </section>
+
+    <section data-search-block>
+      <h2>Current Selected Measurement Set</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Run</th>
+            <th>Label</th>
+            <th>PSD at 76 MHz</th>
+            <th>dB vs dark</th>
+            <th>Max residual after FIR</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="searchable" data-search-text="20260515_092941 dark noise reference">
+            <td><code>20260515_092941</code></td>
+            <td>Dark noise reference</td>
+            <td><code>5.311923e-05</code></td>
+            <td><code>0.00 dB</code></td>
+            <td><code>-95.87 dB</code></td>
+          </tr>
+          <tr class="searchable" data-search-text="20260515_133100 flint2 laser 1030 nm">
+            <td><code>20260515_133100</code></td>
+            <td>Flint2 laser @1030 nm</td>
+            <td><code>2.413202e+05</code></td>
+            <td><code>96.57 dB</code></td>
+            <td><code>-56.64 dB</code></td>
+          </tr>
+          <tr class="searchable" data-search-text="20260515_134951 opo single point 800 nm">
+            <td><code>20260515_134951</code></td>
+            <td>OPO single point @800 nm</td>
+            <td><code>4.642831e+04</code></td>
+            <td><code>89.42 dB</code></td>
+            <td><code>-63.79 dB</code></td>
+          </tr>
+          <tr class="searchable" data-search-text="20260515_140509 opo scanning 800 nm">
+            <td><code>20260515_140509</code></td>
+            <td>OPO scanning @800 nm</td>
+            <td><code>4.615330e+04</code></td>
+            <td><code>89.39 dB</code></td>
+            <td><code>-63.82 dB</code></td>
+          </tr>
+          <tr class="searchable" data-search-text="20260521_162959 vacuum highpass filter alignment 780 nm">
+            <td><code>20260521_162959</code></td>
+            <td>Vacuum highpass filter @780 nm</td>
+            <td><code>3.169411e+05</code></td>
+            <td><code>97.76 dB</code></td>
+            <td><code>-55.46 dB</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section data-search-block>
+      <h2>Data Products</h2>
+      <div class="links">
+        <div class="link-row searchable" data-search-text="selected spectrum current plus minus 100 khz raw highres">
+          <a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_spectrum.csv">Current selected +/-100 kHz spectrum</a>
+          <span class="tag">csv</span>
+        </div>
+        <div class="link-row searchable" data-search-text="selected summary current plus minus 100 khz raw highres">
+          <a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_summary.csv">Current selected +/-100 kHz summary</a>
+          <span class="tag">csv</span>
+        </div>
+        <div class="link-row searchable" data-search-text="after fir selected spectrum residual plus minus 100 khz">
+          <a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_after_2tap_fir_spectrum.csv">After-FIR selected +/-100 kHz spectrum</a>
+          <span class="tag">csv</span>
+        </div>
+        <div class="link-row searchable" data-search-text="after fir selected summary residual plus minus 100 khz">
+          <a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_after_2tap_fir_summary.csv">After-FIR selected +/-100 kHz summary</a>
+          <span class="tag">csv</span>
+        </div>
+        <div class="link-row searchable" data-search-text="no fir dc 100 khz summary positive folded">
+          <a href="raw_highres/ch1_1_76mhz_no_fir_dc_to_100khz_summary.csv">No-FIR DC-to-100 kHz summary</a>
+          <span class="tag">csv</span>
+        </div>
+        <div class="link-row searchable" data-search-text="after fir dc 100 khz summary positive folded">
+          <a href="raw_highres/ch1_1_76mhz_after_2tap_fir_dc_to_100khz_summary.csv">After-FIR DC-to-100 kHz summary</a>
+          <span class="tag">csv</span>
+        </div>
+        <div class="link-row searchable" data-search-text="2 tap fir bandwidth summary rejection threshold 40 60 70 80 db">
+          <a href="raw_highres/ch1_1_76mhz_pm100khz_2tap_fir_bandwidth_summary.csv">2-tap FIR rejection bandwidth summary</a>
+          <span class="tag">csv</span>
+        </div>
+        <div class="link-row searchable" data-search-text="2 tap fir rejection curve plus minus 100 khz">
+          <a href="raw_highres/ch1_1_76mhz_pm100khz_2tap_fir_rejection_curve.csv">2-tap FIR rejection curve</a>
+          <span class="tag">csv</span>
+        </div>
+      </div>
+    </section>
+
+    <section data-search-block>
+      <h2>Other Plots</h2>
+      <div class="links">
+        <div class="link-row searchable" data-search-text="folded no fir dc 100 khz absolute offset">
+          <a href="raw_highres/ch1_1_76mhz_no_fir_dc_to_100khz_folded_abs_offset.png">No FIR, folded absolute offset</a>
+          <span class="tag">png</span>
+        </div>
+        <div class="link-row searchable" data-search-text="folded after fir dc 100 khz absolute offset">
+          <a href="raw_highres/ch1_1_76mhz_after_2tap_fir_dc_to_100khz_folded_abs_offset.png">After FIR, folded absolute offset</a>
+          <span class="tag">png</span>
+        </div>
+        <div class="link-row searchable" data-search-text="selected overlay plus minus 100 khz raw highres">
+          <a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_overlay.png">Selected +/-100 kHz raw overlay</a>
+          <span class="tag">png</span>
+        </div>
+        <div class="link-row searchable" data-search-text="peak comparison selected plus minus 100 khz highpass opo flint2 dark">
+          <a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_peak_comparison.png">Selected peak comparison</a>
+          <span class="tag">png</span>
+        </div>
+        <div class="link-row searchable" data-search-text="highfreq runs plus minus 100 khz raw highres">
+          <a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_highfreq_runs.png">High-frequency run comparison</a>
+          <span class="tag">png</span>
+        </div>
+        <div class="link-row searchable" data-search-text="all raw plus minus 10 khz raw highres">
+          <a href="raw_highres/ch1_1_76mhz_pm10khz_raw_highres_all_raw.png">All raw-backed runs, +/-10 kHz</a>
+          <span class="tag">png</span>
+        </div>
+      </div>
+    </section>
+
+    <section data-search-block>
+      <h2>Older Existing FFT Reference</h2>
+      <p class="note">Useful for historical checks. For careful 76 MHz peak inspection, prefer <code>raw_highres/</code>.</p>
+      <div class="links">
+        <div class="link-row searchable" data-search-text="existing fft exact bin summary">
+          <a href="existing_fft_reference/ch1_1_76mhz_exact_bin_summary.csv">Exact-bin summary from existing FFT</a>
+          <span class="tag">csv</span>
+        </div>
+        <div class="link-row searchable" data-search-text="existing fft high frequency peak comparison">
+          <a href="existing_fft_reference/ch1_1_76mhz_high_frequency_peak_comparison.png">Existing FFT peak comparison</a>
+          <span class="tag">png</span>
+        </div>
+        <div class="link-row searchable" data-search-text="existing fft plus minus 100 mhz selected with 2 tap fir">
+          <a href="existing_fft_reference/ch1_1_76mhz_pm100mhz_existing_fft_selected_db_with_2tap_fir.png">Existing FFT +/-100 MHz with FIR curve</a>
+          <span class="tag">png</span>
+        </div>
+        <div class="link-row searchable" data-search-text="existing fft plus minus 0.1 mhz highres">
+          <a href="existing_fft_reference/ch1_1_76mhz_pm0p1mhz_highres_existing_fft.png">Existing FFT +/-0.1 MHz</a>
+          <span class="tag">png</span>
+        </div>
+      </div>
+    </section>
+
+    <section data-search-block>
+      <h2>Scripts And Logs</h2>
+      <div class="links">
+        <div class="link-row searchable" data-search-text="script raw fft generate highres run names include all raw">
+          <a href="scripts/ch1_1_highres_76mhz_raw_fft.py">Generate high-resolution raw FFT</a>
+          <span class="tag">py</span>
+        </div>
+        <div class="link-row searchable" data-search-text="script selected plots fir dc zoom summary">
+          <a href="scripts/make_selected_76mhz_plots.py">Generate selected plots and FIR products</a>
+          <span class="tag">py</span>
+        </div>
+        <div class="link-row searchable" data-search-text="script ab test focused plots 76 mhz plus minus 25 khz dc 25 dark flint2 780 1560 1600">
+          <a href="scripts/make_ab_test_focus_plots.py">Generate focused AB-test plots</a>
+          <span class="tag">py</span>
+        </div>
+        <div class="link-row searchable" data-search-text="log raw fft run stdout">
+          <a href="logs/ch1_1_highres_76mhz_raw_fft_run.log">Latest raw FFT run log</a>
+          <span class="tag">log</span>
+        </div>
+        <div class="link-row searchable" data-search-text="log raw fft run stderr errors">
+          <a href="logs/ch1_1_highres_76mhz_raw_fft_run.err.log">Latest raw FFT error log</a>
+          <span class="tag">log</span>
+        </div>
+      </div>
+    </section>
+
+    <section data-search-block>
+      <h2>Full File List</h2>
+      <table class="file-table">
+        <thead>
+          <tr>
+            <th>File</th>
+            <th>Type</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="searchable" data-search-text="readme md documentation"><td><a href="README.md">README.md</a></td><td>md</td></tr>
+          <tr class="searchable" data-search-text="existing fft exact bin summary csv"><td><a href="existing_fft_reference/ch1_1_76mhz_exact_bin_summary.csv">existing_fft_reference/ch1_1_76mhz_exact_bin_summary.csv</a></td><td>csv</td></tr>
+          <tr class="searchable" data-search-text="existing fft high frequency peak comparison png"><td><a href="existing_fft_reference/ch1_1_76mhz_high_frequency_peak_comparison.png">existing_fft_reference/ch1_1_76mhz_high_frequency_peak_comparison.png</a></td><td>png</td></tr>
+          <tr class="searchable" data-search-text="existing fft high frequency peak summary csv"><td><a href="existing_fft_reference/ch1_1_76mhz_high_frequency_peak_summary.csv">existing_fft_reference/ch1_1_76mhz_high_frequency_peak_summary.csv</a></td><td>csv</td></tr>
+          <tr class="searchable" data-search-text="existing fft high frequency peak zoom png"><td><a href="existing_fft_reference/ch1_1_76mhz_high_frequency_peak_zoom.png">existing_fft_reference/ch1_1_76mhz_high_frequency_peak_zoom.png</a></td><td>png</td></tr>
+          <tr class="searchable" data-search-text="existing fft plus minus 0.1 mhz summary csv"><td><a href="existing_fft_reference/ch1_1_76mhz_pm0p1mhz_existing_fft_summary.csv">existing_fft_reference/ch1_1_76mhz_pm0p1mhz_existing_fft_summary.csv</a></td><td>csv</td></tr>
+          <tr class="searchable" data-search-text="existing fft plus minus 0.1 mhz png"><td><a href="existing_fft_reference/ch1_1_76mhz_pm0p1mhz_highres_existing_fft.png">existing_fft_reference/ch1_1_76mhz_pm0p1mhz_highres_existing_fft.png</a></td><td>png</td></tr>
+          <tr class="searchable" data-search-text="existing fft plus minus 100 mhz fir rejection curve csv"><td><a href="existing_fft_reference/ch1_1_76mhz_pm100mhz_2tap_fir_rejection_curve.csv">existing_fft_reference/ch1_1_76mhz_pm100mhz_2tap_fir_rejection_curve.csv</a></td><td>csv</td></tr>
+          <tr class="searchable" data-search-text="existing fft plus minus 100 mhz selected db with fir png"><td><a href="existing_fft_reference/ch1_1_76mhz_pm100mhz_existing_fft_selected_db_with_2tap_fir.png">existing_fft_reference/ch1_1_76mhz_pm100mhz_existing_fft_selected_db_with_2tap_fir.png</a></td><td>png</td></tr>
+          <tr class="searchable" data-search-text="existing fft plus minus 100 mhz selected summary csv"><td><a href="existing_fft_reference/ch1_1_76mhz_pm100mhz_existing_fft_selected_summary.csv">existing_fft_reference/ch1_1_76mhz_pm100mhz_existing_fft_selected_summary.csv</a></td><td>csv</td></tr>
+          <tr class="searchable" data-search-text="raw highres after fir dc 100 khz folded csv"><td><a href="raw_highres/ch1_1_76mhz_after_2tap_fir_dc_to_100khz_folded_abs_offset.csv">raw_highres/ch1_1_76mhz_after_2tap_fir_dc_to_100khz_folded_abs_offset.csv</a></td><td>csv</td></tr>
+          <tr class="searchable" data-search-text="raw highres after fir dc 100 khz folded png"><td><a href="raw_highres/ch1_1_76mhz_after_2tap_fir_dc_to_100khz_folded_abs_offset.png">raw_highres/ch1_1_76mhz_after_2tap_fir_dc_to_100khz_folded_abs_offset.png</a></td><td>png</td></tr>
+          <tr class="searchable" data-search-text="raw highres after fir dc 100 khz positive csv"><td><a href="raw_highres/ch1_1_76mhz_after_2tap_fir_dc_to_100khz_positive_offset.csv">raw_highres/ch1_1_76mhz_after_2tap_fir_dc_to_100khz_positive_offset.csv</a></td><td>csv</td></tr>
+          <tr class="searchable" data-search-text="raw highres after fir dc 100 khz positive png"><td><a href="raw_highres/ch1_1_76mhz_after_2tap_fir_dc_to_100khz_positive_offset.png">raw_highres/ch1_1_76mhz_after_2tap_fir_dc_to_100khz_positive_offset.png</a></td><td>png</td></tr>
+          <tr class="searchable" data-search-text="raw highres after fir dc 100 khz summary csv"><td><a href="raw_highres/ch1_1_76mhz_after_2tap_fir_dc_to_100khz_summary.csv">raw_highres/ch1_1_76mhz_after_2tap_fir_dc_to_100khz_summary.csv</a></td><td>csv</td></tr>
+          <tr class="searchable" data-search-text="raw highres no fir dc 100 khz folded csv"><td><a href="raw_highres/ch1_1_76mhz_no_fir_dc_to_100khz_folded_abs_offset.csv">raw_highres/ch1_1_76mhz_no_fir_dc_to_100khz_folded_abs_offset.csv</a></td><td>csv</td></tr>
+          <tr class="searchable" data-search-text="raw highres no fir dc 100 khz folded png"><td><a href="raw_highres/ch1_1_76mhz_no_fir_dc_to_100khz_folded_abs_offset.png">raw_highres/ch1_1_76mhz_no_fir_dc_to_100khz_folded_abs_offset.png</a></td><td>png</td></tr>
+          <tr class="searchable" data-search-text="raw highres no fir dc 100 khz positive csv"><td><a href="raw_highres/ch1_1_76mhz_no_fir_dc_to_100khz_positive_offset.csv">raw_highres/ch1_1_76mhz_no_fir_dc_to_100khz_positive_offset.csv</a></td><td>csv</td></tr>
+          <tr class="searchable" data-search-text="raw highres no fir dc 100 khz positive png"><td><a href="raw_highres/ch1_1_76mhz_no_fir_dc_to_100khz_positive_offset.png">raw_highres/ch1_1_76mhz_no_fir_dc_to_100khz_positive_offset.png</a></td><td>png</td></tr>
+          <tr class="searchable" data-search-text="raw highres no fir dc 100 khz summary csv"><td><a href="raw_highres/ch1_1_76mhz_no_fir_dc_to_100khz_summary.csv">raw_highres/ch1_1_76mhz_no_fir_dc_to_100khz_summary.csv</a></td><td>csv</td></tr>
+          <tr class="searchable" data-search-text="raw highres plus minus 100 khz fir bandwidth summary csv"><td><a href="raw_highres/ch1_1_76mhz_pm100khz_2tap_fir_bandwidth_summary.csv">raw_highres/ch1_1_76mhz_pm100khz_2tap_fir_bandwidth_summary.csv</a></td><td>csv</td></tr>
+          <tr class="searchable" data-search-text="raw highres plus minus 100 khz fir rejection curve csv"><td><a href="raw_highres/ch1_1_76mhz_pm100khz_2tap_fir_rejection_curve.csv">raw_highres/ch1_1_76mhz_pm100khz_2tap_fir_rejection_curve.csv</a></td><td>csv</td></tr>
+          <tr class="searchable" data-search-text="raw highres high frequency runs png"><td><a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_highfreq_runs.png">raw_highres/ch1_1_76mhz_pm100khz_raw_highres_highfreq_runs.png</a></td><td>png</td></tr>
+          <tr class="searchable" data-search-text="raw highres selected after fir db png"><td><a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_after_2tap_fir_db.png">raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_after_2tap_fir_db.png</a></td><td>png</td></tr>
+          <tr class="searchable" data-search-text="raw highres selected after fir spectrum csv"><td><a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_after_2tap_fir_spectrum.csv">raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_after_2tap_fir_spectrum.csv</a></td><td>csv</td></tr>
+          <tr class="searchable" data-search-text="raw highres selected after fir summary csv"><td><a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_after_2tap_fir_summary.csv">raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_after_2tap_fir_summary.csv</a></td><td>csv</td></tr>
+          <tr class="searchable" data-search-text="raw highres selected db with fir png"><td><a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_db_with_2tap_fir.png">raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_db_with_2tap_fir.png</a></td><td>png</td></tr>
+          <tr class="searchable" data-search-text="raw highres selected overlay png"><td><a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_overlay.png">raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_overlay.png</a></td><td>png</td></tr>
+          <tr class="searchable" data-search-text="raw highres selected peak comparison png"><td><a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_peak_comparison.png">raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_peak_comparison.png</a></td><td>png</td></tr>
+          <tr class="searchable" data-search-text="raw highres selected runs png"><td><a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_runs.png">raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_runs.png</a></td><td>png</td></tr>
+          <tr class="searchable" data-search-text="raw highres selected spectrum csv"><td><a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_spectrum.csv">raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_spectrum.csv</a></td><td>csv</td></tr>
+          <tr class="searchable" data-search-text="raw highres selected summary csv"><td><a href="raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_summary.csv">raw_highres/ch1_1_76mhz_pm100khz_raw_highres_selected_summary.csv</a></td><td>csv</td></tr>
+          <tr class="searchable" data-search-text="script highres raw fft py"><td><a href="scripts/ch1_1_highres_76mhz_raw_fft.py">scripts/ch1_1_highres_76mhz_raw_fft.py</a></td><td>py</td></tr>
+          <tr class="searchable" data-search-text="script ab test focus plots py"><td><a href="scripts/make_ab_test_focus_plots.py">scripts/make_ab_test_focus_plots.py</a></td><td>py</td></tr>
+          <tr class="searchable" data-search-text="script selected plots py"><td><a href="scripts/make_selected_76mhz_plots.py">scripts/make_selected_76mhz_plots.py</a></td><td>py</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+
+  <script>
+    const search = document.getElementById("search");
+    const items = Array.from(document.querySelectorAll(".searchable"));
+    const sections = Array.from(document.querySelectorAll("[data-search-block]"));
+
+    function normalize(value) {
+      return value.toLowerCase().replace(/[_\\/-]+/g, " ");
+    }
+
+    function applyFilter() {
+      const query = normalize(search.value.trim());
+
+      items.forEach((item) => {
+        const text = normalize(`${item.textContent} ${item.dataset.searchText || ""}`);
+        item.classList.toggle("hidden", query.length > 0 && !text.includes(query));
+      });
+
+      sections.forEach((section) => {
+        const visible = section.querySelector(".searchable:not(.hidden)");
+        section.classList.toggle("hidden", query.length > 0 && !visible);
+      });
+    }
+
+    search.addEventListener("input", applyFilter);
+  </script>
+</body>
+</html>

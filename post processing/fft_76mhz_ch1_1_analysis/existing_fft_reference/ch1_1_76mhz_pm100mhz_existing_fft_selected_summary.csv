@@ -1,0 +1,5 @@
+run_name,label,frequency_range_mhz,bin_spacing_hz,nearest_76_mhz,psd_db_at_nearest_76mhz,local_peak_mhz_75p9_76p1,local_peak_psd_db,source_csv
+20260515_092941,Dark noise reference,0-176,9277.34375,76.0,-48.91883505588837,75.99072265625,-48.90617304619421,D:\Quantum Squeezing Project\DataFiles\20260515_092941\fft_analysis\interleaved_fft_high_frequency_semilog.csv
+20260515_133100,Flint2 laser @1030 nm,0-176,9277.34375,76.0,35.77618514015771,76.0,35.77618514015771,D:\Quantum Squeezing Project\DataFiles\20260515_133100\fft_analysis\interleaved_fft_high_frequency_semilog.csv
+20260515_134951,OPO single point @800 nm,0-176,9277.34375,76.0,28.556794521933007,76.0,28.556794521933007,D:\Quantum Squeezing Project\DataFiles\20260515_134951\fft_analysis\interleaved_fft_high_frequency_semilog.csv
+20260515_140509,OPO scanning @800 nm,0-176,9277.34375,76.0,28.580306991045582,76.0,28.580306991045582,D:\Quantum Squeezing Project\DataFiles\20260515_140509\fft_analysis\interleaved_fft_high_frequency_semilog.csv

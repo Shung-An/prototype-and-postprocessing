@@ -33,6 +33,7 @@ KNOWN_FFT_NAMES = {
     "interleaved_fft_high_frequency_semilog.png",
     "interleaved_fft_high_frequency_semilog.csv",
 }
+RAW_FFT_CANDIDATE_MODE = "raw_fft_candidate"
 
 
 @dataclass(frozen=True)
@@ -310,6 +311,13 @@ def build_measurement_note(
     if wavelength_nm is not None:
         parts.append(f"{wavelength_nm:g} nm")
 
+    detector = safe_text(
+        nested_value(metadata, "PhysicsData", "Detector")
+        or metadata.get("Detector")
+    )
+    if detector:
+        parts.append(f"detector {detector}")
+
     scan_range_mm = first_float(metadata, [("PhysicsData", "ScanRange_mm"), ("ScanRange_mm",)])
     scan_velocity_mm_s = first_float(
         metadata,
@@ -324,6 +332,30 @@ def build_measurement_note(
         parts.append(f"scan range {scan_range_mm:g} mm")
     if scan_velocity_mm_s is not None and scan_velocity_mm_s > 0:
         parts.append(f"scan rate {scan_velocity_mm_s:g} mm/s")
+
+    motor1 = safe_text(
+        nested_value(metadata, "Configuration", "Motor1Position")
+        or metadata.get("Motor1Position")
+    )
+    motor2 = safe_text(
+        nested_value(metadata, "Configuration", "Motor2Position")
+        or metadata.get("Motor2Position")
+    )
+    if motor1:
+        parts.append(f"motor1 {motor1}")
+    if motor2:
+        parts.append(f"motor2 {motor2}")
+
+    shot_noise = first_float(
+        metadata,
+        [
+            ("PhysicsData", "ShotNoiseResult_urad2_rtHz"),
+            ("PhysicsData", "ShotNoiseResult"),
+            ("ShotNoiseResult_urad2_rtHz",),
+        ],
+    )
+    if shot_noise is not None:
+        parts.append(f"shot noise {shot_noise:g} urad^2/rtHz")
 
     if raw_file_count:
         parts.append(f"{MEASUREMENT_CHANNEL_COUNT} interleaved channels")
@@ -354,6 +386,107 @@ def discover_fft_files(root_path: Path) -> list[Path]:
             if path.is_file() and is_fft_artifact(path):
                 found[str(path.resolve()).lower()] = path.resolve()
     return sorted(found.values(), key=lambda item: str(item).lower())
+
+
+def discover_raw_candidate_folders(root_path: Path) -> list[Path]:
+    folders: dict[str, Path] = {}
+    for path in root_path.rglob("Data_*.bin"):
+        if path.is_file():
+            folders[str(path.parent.resolve()).lower()] = path.parent.resolve()
+    return sorted(folders.values(), key=lambda item: str(item).lower())
+
+
+def build_raw_candidate_artifact(root_path: Path, run_folder: Path) -> FftArtifact:
+    metadata = read_run_metadata(run_folder)
+    tags = safe_tags(metadata.get("Tags"))
+    raw_file_count, raw_total_bytes, raw_files = summarize_raw_files(run_folder)
+    if not raw_files:
+        raise ValueError(f"{run_folder} has no Data_*.bin raw files.")
+
+    sample = safe_text(metadata.get("Sample"))
+    experiment_tag = safe_text(
+        metadata.get("ExperimentTag")
+        or metadata.get("ExpTag")
+        or nested_value(metadata, "Configuration", "ExperimentTag")
+        or nested_value(metadata, "PhysicsData", "ExperimentTag")
+    )
+    description = safe_text(metadata.get("Description"))
+    measurement_note = build_measurement_note(
+        metadata,
+        sample,
+        experiment_tag,
+        description,
+        tags,
+        raw_file_count,
+        raw_total_bytes,
+    )
+    run_timestamp = parse_run_timestamp(run_folder, metadata)
+    raw_path = run_folder / str(raw_files[0]["name"])
+    summary = {
+        "file_name": raw_path.name,
+        "file_size_bytes": raw_path.stat().st_size,
+        "modified_time": datetime.fromtimestamp(raw_path.stat().st_mtime).isoformat(timespec="seconds"),
+        "raw_file_count": raw_file_count,
+        "raw_total_bytes": raw_total_bytes,
+        "raw_total_gb": round(raw_total_bytes / (1024**3), 3),
+        "raw_files": raw_files,
+        "purpose": "Raw data is available for customized FFT analysis.",
+    }
+    metadata_subset = {
+        "Sample": sample,
+        "ExperimentTag": experiment_tag,
+        "Description": description,
+        "MeasurementNote": measurement_note,
+        "MeasurementChannelCount": MEASUREMENT_CHANNEL_COUNT,
+        "MeasurementChannelLayout": MEASUREMENT_CHANNEL_LAYOUT,
+        "Tags": tags,
+        "RunTimestamp": run_timestamp,
+        "FFTAnalysis": metadata.get("FFTAnalysis") if isinstance(metadata.get("FFTAnalysis"), dict) else None,
+        "ConfigurationFFT": {
+            key: value
+            for key, value in (metadata.get("Configuration") if isinstance(metadata.get("Configuration"), dict) else {}).items()
+            if "FFT" in key.upper()
+        },
+        "RawFftCandidate": True,
+    }
+    blob_parts = [
+        "Raw Data FFT Candidate",
+        RAW_FFT_CANDIDATE_MODE,
+        "raw data",
+        raw_path.name,
+        str(raw_path),
+        run_folder.name,
+        str(run_folder),
+        sample,
+        experiment_tag,
+        description,
+        " ".join(tags),
+        measurement_note,
+        "custom fft",
+        "customized fft",
+        "raw-backed fft",
+        f"raw_files_{raw_file_count}",
+        json.dumps(summary, sort_keys=True),
+    ]
+    return FftArtifact(
+        root_path=root_path,
+        run_folder=run_folder,
+        path=raw_path,
+        artifact_type="raw",
+        mode=RAW_FFT_CANDIDATE_MODE,
+        title="Raw Data FFT Candidate",
+        sample=sample,
+        experiment_tag=experiment_tag,
+        description=description,
+        tags=", ".join(tags),
+        measurement_note=measurement_note,
+        raw_file_count=raw_file_count,
+        raw_total_bytes=raw_total_bytes,
+        run_timestamp=run_timestamp,
+        metadata_json=json.dumps(metadata_subset, ensure_ascii=False, sort_keys=True),
+        summary_json=json.dumps(summary, ensure_ascii=False, sort_keys=True),
+        search_blob=" ".join(part for part in blob_parts if part).lower(),
+    )
 
 
 def build_artifact(root_path: Path, path: Path) -> FftArtifact:
@@ -492,6 +625,7 @@ def rebuild_index(root_path: Path, db_path: Path = DEFAULT_DB_PATH) -> list[FftA
     root_path = root_path.expanduser().resolve()
     ensure_db(db_path)
     artifacts = [build_artifact(root_path, path) for path in discover_fft_files(root_path)]
+    artifacts.extend(build_raw_candidate_artifact(root_path, folder) for folder in discover_raw_candidate_folders(root_path))
     indexed_at = datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="seconds")
     key = root_key(root_path)
 
@@ -801,7 +935,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     search = subparsers.add_parser("search", help="Search the FFT metadata index.")
     search.add_argument("query", nargs="*", help="Search terms. All terms must match.")
-    search.add_argument("--mode", choices=["low_frequency", "high_frequency", "peaks", "raw_std", "spectrum", "unknown"], help="Filter by FFT mode/category.")
+    search.add_argument("--mode", choices=["low_frequency", "high_frequency", "peaks", "raw_std", "spectrum", RAW_FFT_CANDIDATE_MODE, "unknown"], help="Filter by FFT mode/category.")
     search.add_argument("--type", choices=["plot", "csv"], dest="artifact_type", help="Filter by artifact type.")
     search.add_argument("--raw-only", action="store_true", help="Only show FFT artifacts from folders that still contain Data_*.bin raw files.")
     search.add_argument("--limit", type=int, default=25, help="Maximum rows to show.")

@@ -1,0 +1,9 @@
+Metric,Value,Unit,Note
+sample_rate,608000000,Hz,ADC sample rate
+notch_frequency,76000000,Hz,Target notch
+two_tap_delay,8,samples,"Fs / f0, using y[n] = (x[n] - x[n-D]) / 2"
+visible_window_edge_rejection,-67.7982,dB,Minimum rejection inside +/-9.86 kHz window
+full_bandwidth_at_least_40_db_rejection,483839.091213,Hz,+/-241.92 kHz around 76 MHz
+full_bandwidth_at_least_60_db_rejection,48383.1107638,Hz,+/-24.1916 kHz around 76 MHz
+full_bandwidth_at_least_70_db_rejection,15300.0807348,Hz,+/-7.65004 kHz around 76 MHz
+full_bandwidth_at_least_80_db_rejection,4838.31027806,Hz,+/-2.41916 kHz around 76 MHz

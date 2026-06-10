@@ -47,12 +47,15 @@ class SpectrumResult:
     local_median_psd: float
 
 
-def read_runs(notes_csv: Path, include_all_raw: bool) -> list[RunInfo]:
+def read_runs(notes_csv: Path, include_all_raw: bool, run_names: list[str] | None) -> list[RunInfo]:
+    selected = set(run_names or [])
     runs: list[RunInfo] = []
     with notes_csv.open("r", newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
             modes = row.get("modes", "")
-            if not include_all_raw and "high_frequency" not in modes:
+            if selected and row["run_name"] not in selected:
+                continue
+            if not selected and not include_all_raw and "high_frequency" not in modes:
                 continue
 
             run_folder = Path(row["run_folder"])
@@ -68,6 +71,9 @@ def read_runs(notes_csv: Path, include_all_raw: bool) -> list[RunInfo]:
                 )
             )
 
+    if run_names:
+        order = {run_name: index for index, run_name in enumerate(run_names)}
+        return sorted(runs, key=lambda item: order.get(item.run_name, len(order)))
     return sorted(runs, key=lambda item: item.run_name)
 
 
@@ -248,7 +254,21 @@ def short_note(note: str) -> str:
     return "; ".join(keep) if keep else note[:60]
 
 
-def save_plot(path: Path, results: list[SpectrumResult], *, center_hz: float) -> None:
+def format_window_label(half_width_hz: float) -> str:
+    if half_width_hz >= 1_000_000 and half_width_hz % 1_000_000 == 0:
+        return f"pm{int(half_width_hz / 1_000_000)}mhz"
+    if half_width_hz >= 1_000 and half_width_hz % 1_000 == 0:
+        return f"pm{int(half_width_hz / 1_000)}khz"
+    return f"pm{int(round(half_width_hz))}hz"
+
+
+def save_plot(
+    path: Path,
+    results: list[SpectrumResult],
+    *,
+    center_hz: float,
+    half_width_hz: float,
+) -> None:
     fig, ax = plt.subplots(figsize=(14, 8), dpi=180)
     for result in results:
         label = f"{result.run.run_name}: {short_note(result.run.measurement_note)}"
@@ -259,7 +279,8 @@ def save_plot(path: Path, results: list[SpectrumResult], *, center_hz: float) ->
     ax.set_xlabel("Offset from 76 MHz (kHz)")
     ax.set_ylabel("PSD (counts^2/Hz)")
     ax.set_title(
-        f"Ch1-1 raw FFT near 76 MHz, +/-10 kHz window, bin spacing {bin_spacing_hz:.2f} Hz"
+        f"Ch1-1 raw FFT near 76 MHz, +/-{half_width_hz / 1e3:g} kHz window, "
+        f"bin spacing {bin_spacing_hz:.2f} Hz"
     )
     ax.grid(True, which="both", alpha=0.25)
     ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=7)
@@ -280,6 +301,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fft-length", type=int, default=DEFAULT_FFT_LENGTH)
     parser.add_argument("--max-frames-per-run", type=int, default=DEFAULT_MAX_FRAMES_PER_RUN)
     parser.add_argument(
+        "--run-names",
+        nargs="*",
+        default=None,
+        help="Optional explicit run names to process. This bypasses the high-frequency mode filter.",
+    )
+    parser.add_argument(
         "--include-all-raw",
         action="store_true",
         help="Include every raw-backed measurement in the notes CSV, not only measurements with old high-frequency FFT files.",
@@ -289,7 +316,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    runs = read_runs(args.notes_csv, include_all_raw=args.include_all_raw)
+    runs = read_runs(args.notes_csv, include_all_raw=args.include_all_raw, run_names=args.run_names)
     if not runs:
         raise SystemExit("No matching raw-backed measurements were found.")
 
@@ -313,12 +340,13 @@ def main() -> None:
             flush=True,
         )
 
-    suffix = "all_raw" if args.include_all_raw else "highfreq_runs"
-    plot_path = args.output_dir / f"ch1_1_76mhz_pm10khz_raw_highres_{suffix}.png"
-    spectrum_csv_path = args.output_dir / f"ch1_1_76mhz_pm10khz_raw_highres_spectrum_{suffix}.csv"
-    summary_csv_path = args.output_dir / f"ch1_1_76mhz_pm10khz_raw_highres_summary_{suffix}.csv"
+    suffix = "selected_runs" if args.run_names else "all_raw" if args.include_all_raw else "highfreq_runs"
+    window_label = format_window_label(args.half_width_hz)
+    plot_path = args.output_dir / f"ch1_1_76mhz_{window_label}_raw_highres_{suffix}.png"
+    spectrum_csv_path = args.output_dir / f"ch1_1_76mhz_{window_label}_raw_highres_spectrum_{suffix}.csv"
+    summary_csv_path = args.output_dir / f"ch1_1_76mhz_{window_label}_raw_highres_summary_{suffix}.csv"
 
-    save_plot(plot_path, results, center_hz=args.center_hz)
+    save_plot(plot_path, results, center_hz=args.center_hz, half_width_hz=args.half_width_hz)
     save_spectrum_csv(spectrum_csv_path, results)
     save_summary_csv(summary_csv_path, results, fft_length=args.fft_length, center_hz=args.center_hz)
     print(f"Saved plot: {plot_path}")
