@@ -8,6 +8,8 @@ This folder contains the current post-processing workflow for Quantum Squeezing 
 - `cm_pipeline_all_in_one.py`: Python post-processing pipeline for one or more run folders.
 - `repair_attenuation_metadata.py`: helper for repairing older attenuator metadata.
 
+For complete pipeline setup, input-format, command, output, cache, and troubleshooting details, see [`CM_PIPELINE_INSTRUCTIONS.md`](./CM_PIPELINE_INSTRUCTIONS.md).
+
 The tools expect a `DataFiles` tree containing run folders with processed outputs such as `final_clean_result.png`, `metadata.json`, and optional `signal_emergence.mp4`.
 
 ## Quick Start
