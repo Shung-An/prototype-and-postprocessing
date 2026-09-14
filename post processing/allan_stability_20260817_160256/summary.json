@@ -1,0 +1,94 @@
+{
+  "source": "D:\\Quantum Squeezing Project\\DataFiles\\20260817_160256",
+  "description": "Testing run, highpass + bandpass + attenuator, stay, CeF3",
+  "frames": 120322,
+  "nominal_frame_dt_s": 0.013783172186792841,
+  "nominal_duration_s": 1658.4188438592882,
+  "maximum_tau_s": 165.8391277513001,
+  "conversion_factor": 3860.0,
+  "display_in_v2": false,
+  "notes": "No detrending or smoothing. Profile timestamps are transfer times. Linear slopes are descriptive full-record fits, not drift-only estimates. Allan tails include stochastic noise; overlapping counts are not independent DOF.",
+  "pairs": [
+    {
+      "pair": "(7,2)-(8,3)",
+      "final_mean": -0.6660695371138449,
+      "linear_fit_slope_per_s": 3.748846546967733e-05,
+      "first_variance": 64.19324234169325,
+      "final_variance": 0.32780374142613516,
+      "minimum_tau_s": 165.8391277513001,
+      "tail_log_slope": -0.8732675023921518
+    },
+    {
+      "pair": "(1,3)-(6,8)",
+      "final_mean": 0.3215291287385063,
+      "linear_fit_slope_per_s": 7.803486183355449e-05,
+      "first_variance": 285.7144971970559,
+      "final_variance": 2.5658415629475892,
+      "minimum_tau_s": 165.8391277513001,
+      "tail_log_slope": -0.842606217590121
+    },
+    {
+      "pair": "(2,3)-(7,8)",
+      "final_mean": 0.3271933592449269,
+      "linear_fit_slope_per_s": 0.00019958873376196644,
+      "first_variance": 244.82788588500603,
+      "final_variance": 2.369924098877195,
+      "minimum_tau_s": 165.8391277513001,
+      "tail_log_slope": -0.8883692421453979
+    },
+    {
+      "pair": "(6,1)-(8,3)",
+      "final_mean": 0.09359415300634792,
+      "linear_fit_slope_per_s": 0.00010428432078058217,
+      "first_variance": 173.73228237710893,
+      "final_variance": 1.3184227058773073,
+      "minimum_tau_s": 165.8391277513001,
+      "tail_log_slope": -0.8163505969191124
+    },
+    {
+      "pair": "(2,2)-(8,8)",
+      "final_mean": 0.21417516922887653,
+      "linear_fit_slope_per_s": 0.00015947864204379842,
+      "first_variance": 175.35435959033865,
+      "final_variance": 1.7367983290249067,
+      "minimum_tau_s": 165.8391277513001,
+      "tail_log_slope": -0.8565345357557482
+    },
+    {
+      "pair": "(1,2)-(7,8)",
+      "final_mean": 0.7038582272950594,
+      "linear_fit_slope_per_s": 0.0003252733222162418,
+      "first_variance": 195.9852603222423,
+      "final_variance": 1.8232689082511673,
+      "minimum_tau_s": 165.8391277513001,
+      "tail_log_slope": -0.8381854812169638
+    },
+    {
+      "pair": "(7,1)-(8,2)",
+      "final_mean": 1.0515649783950602,
+      "linear_fit_slope_per_s": 7.47357858579516e-05,
+      "first_variance": 77.04839522618592,
+      "final_variance": 0.3248670720120962,
+      "minimum_tau_s": 165.8391277513001,
+      "tail_log_slope": -0.8047915494273497
+    },
+    {
+      "pair": "(3,1)-(8,6)",
+      "final_mean": 0.06312797772899002,
+      "linear_fit_slope_per_s": 0.00015201890232724558,
+      "first_variance": 292.46811870049333,
+      "final_variance": 3.031839094796386,
+      "minimum_tau_s": 165.8391277513001,
+      "tail_log_slope": -0.8147027861478308
+    },
+    {
+      "pair": "(3,2)-(8,7)",
+      "final_mean": 0.8436191632706087,
+      "linear_fit_slope_per_s": 0.00017315273295588556,
+      "first_variance": 254.80266477257365,
+      "final_variance": 2.9058270692445687,
+      "minimum_tau_s": 165.8391277513001,
+      "tail_log_slope": -0.836375380167506
+    }
+  ]
+}

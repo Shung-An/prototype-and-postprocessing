@@ -31,7 +31,7 @@ BIN_MM = 0.1
 # Attenuator correction is supplied by WPF metadata and read directly by this pipeline.
 DETECTOR_AREA_SCALE = (0.24**2) / (32768**2)
 # Bump this when a code or assumption change should force existing runs to rebuild once.
-PIPELINE_CACHE_VERSION = "2026-05-14-dark-noise-reference-factor-v1"
+PIPELINE_CACHE_VERSION = "2026-09-11-overlapping-allan-variance-v1"
 # Conversion factor from distance in millimeters to time in picoseconds for this setup.
 MM_TO_PS = 6.6
 # Time per processed frame, in seconds:
@@ -1414,6 +1414,49 @@ def save_selected_pairs_plot(
     plt.close(fig)
 
 
+def overlapping_allan_variance(
+    values: np.ndarray, time_s: np.ndarray, max_points: int = 80,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Allan variance of measured values (not phase), without detrending.
+
+    Adjacent m-frame averages are differenced at every possible starting frame.
+    Windows crossing nonfinite values or timing gaps are excluded, not joined.
+    Tau uses the median frame cadence; intervals outside 0.5--1.5 times that
+    cadence break a segment. Counts are overlapping terms, not independent DOF.
+    Limit tau to N/10 for at least ten nominal averaging blocks.
+    """
+    values = np.asarray(values, dtype=float)
+    time_s = np.asarray(time_s, dtype=float)
+    if values.ndim == 1:
+        values = values[:, None]
+    if values.ndim != 2 or time_s.shape != (len(values),):
+        raise ValueError("Expected values (frames, channels) and one time per frame.")
+    if len(values) < 10 or not np.all(np.isfinite(time_s)):
+        raise ValueError("Allan variance requires at least ten frames with finite times.")
+    steps = np.diff(time_s)
+    if np.any(steps <= 0):
+        raise ValueError("Allan variance requires strictly increasing timestamps.")
+    dt = float(np.median(steps))
+    factors = np.unique(np.geomspace(1, len(values) // 10, max_points).astype(int))
+    finite = np.isfinite(values)
+    # Centering improves cumulative-sum accuracy; it does not remove drift.
+    center = np.nanmean(np.where(finite, values, np.nan), axis=0)
+    sums = np.vstack([np.zeros(values.shape[1]), np.cumsum(np.where(finite, values - center, 0), axis=0)])
+    bad = np.vstack([np.zeros(values.shape[1], dtype=int), np.cumsum(~finite, axis=0)])
+    gaps = np.r_[0, np.cumsum((steps < 0.5 * dt) | (steps > 1.5 * dt))]
+    variances, counts = [], []
+    for m in factors:
+        delta = (sums[2*m:] - 2*sums[m:-m] + sums[:-2*m]) / m
+        valid = (bad[2*m:] - bad[:-2*m]) == 0
+        valid &= (gaps[2*m-1:] == gaps[:len(values)-2*m+1])[:, None]
+        count = valid.sum(axis=0)
+        variance = np.divide(np.sum(np.where(valid, delta**2, 0), axis=0),
+                             2*count, out=np.full(values.shape[1], np.nan), where=count > 0)
+        variances.append(variance)
+        counts.append(count)
+    return factors * dt, np.asarray(variances), np.asarray(counts), factors
+
+
 def save_loglog_eval(
     run_folder: Path,
     time_tail: np.ndarray,
@@ -1432,19 +1475,34 @@ def save_loglog_eval(
     pair_i1 = np.array([idx_lin(pair[0], pair[1]) for pair in selected_pairs], dtype=int)
     pair_i2 = np.array([idx_lin(pair[2], pair[3]) for pair in selected_pairs], dtype=int)
     diffs = cm[:, pair_i1] - cm[:, pair_i2]
-    divisors = np.arange(1, len(time_tail) + 1, dtype=float)[:, None]
-    run_means = np.cumsum(diffs, axis=0) / divisors
-    yvals = np.abs(scale_for_display(run_means, conversion_factor, display_in_v2))
-    yvals[yvals <= 0] = np.nan
+    values = scale_for_display(diffs, conversion_factor, display_in_v2)
+    try:
+        xvals, yvals, counts, factors = overlapping_allan_variance(values, time_tail)
+    except ValueError as exc:
+        fig, ax = plt.subplots(figsize=(9, 6.5))
+        ax.text(0.5, 0.5, str(exc), ha="center", va="center", wrap=True)
+        ax.set_axis_off()
+        save_figure_with_provenance(fig, run_folder / "loglog_eval.png", run_folder)
+        plt.close(fig)
+        warnings.warn(str(exc))
+        return
+    with (run_folder / "allan_variance.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["pair", "averaging_frames", "tau_s", "allan_variance",
+                         "allan_deviation", "overlapping_terms", "variance_unit"])
+        for row, tau in enumerate(xvals):
+            for col, pair_idx in enumerate(keep_indices):
+                writer.writerow([labels[pair_idx], factors[row], tau, yvals[row, col],
+                                 np.sqrt(yvals[row, col]), counts[row, col],
+                                 "V^4" if display_in_v2 else "urad^4"])
 
     fig, ax = plt.subplots(figsize=(9, 6.5))
-    xvals = np.maximum(time_tail, FRAME_DT_S)
     for col_idx, pair_idx in enumerate(keep_indices):
-        plot_x, plot_y = downsample_for_plot(xvals, yvals[:, col_idx])
-        ax.loglog(plot_x, plot_y, label=labels[pair_idx])
-    ax.set_title("Log-Log Evaluation (Cleaned)")
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel(running_mean_axis_label(display_in_v2, use_abs=True))
+        ax.loglog(xvals, np.where(yvals[:, col_idx] > 0, yvals[:, col_idx], np.nan), label=labels[pair_idx])
+    ax.set_title("Overlapping Allan variance (no detrending)")
+    ax.set_xlabel(r"Averaging time $\tau$ (s; nominal acquisition time)")
+    ax.set_ylabel(r"Allan variance (V$^4$)" if display_in_v2 else r"Allan variance ($\mu$rad$^4$)")
+    ax.grid(True, which="both", alpha=0.2)
     ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
     fig.tight_layout()
     save_figure_with_provenance(fig, run_folder / "loglog_eval.png", run_folder)
@@ -1954,10 +2012,12 @@ def run_pipeline(
     save_raw_std_analysis(run_folder, raw_cm_all, t_seconds_all)
 
     raw_cm = raw_cm_all
+    allan_time_s = np.arange(n_frames_all, dtype=float) * FRAME_DT_S
     t_seconds = t_seconds_all
     t_absolute_seconds = t_absolute_seconds_all
     if ENABLE_EVEN_FRAMES_ONLY:
         raw_cm = raw_cm[::2]
+        allan_time_s = allan_time_s[::2]
         t_seconds = t_seconds[::2]
         t_absolute_seconds = t_absolute_seconds[::2]
     n_frames = raw_cm.shape[0]
@@ -2018,6 +2078,7 @@ def run_pipeline(
     if ENABLE_SATURATION_CLEANUP and np.any(dirty_mask):
         keep = ~dirty_mask
         cm = cm[keep]
+        allan_time_s = allan_time_s[keep]
         t_seconds = t_seconds[keep]
         pos_on_cm = pos_on_cm[keep]
         t_datetimes = [dt for dt, k in zip(t_datetimes, keep, strict=False) if bool(k)]
@@ -2030,6 +2091,7 @@ def run_pipeline(
         if np.any(dropped_mask):
             keep = ~dropped_mask
             cm = cm[keep]
+            allan_time_s = allan_time_s[keep]
             t_seconds = t_seconds[keep]
             pos_on_cm = pos_on_cm[keep]
             t_datetimes = [dt for dt, k in zip(t_datetimes, keep, strict=False) if bool(k)]
@@ -2038,6 +2100,7 @@ def run_pipeline(
     if ENABLE_SATURATION_CLEANUP and np.any(dirty_mask):
         keep = ~dirty_mask
         cm = cm[keep]
+        allan_time_s = allan_time_s[keep]
         t_seconds = t_seconds[keep]
         pos_on_cm = pos_on_cm[keep]
         t_datetimes = [dt for dt, k in zip(t_datetimes, keep, strict=False) if bool(k)]
@@ -2069,6 +2132,7 @@ def run_pipeline(
             )
         raw_cm = raw_cm[keep]
         cm = cm[keep]
+        allan_time_s = allan_time_s[keep]
         t_seconds = t_seconds[keep]
         pos_on_cm = pos_on_cm[keep]
         t_datetimes = [dt for dt, k in zip(t_datetimes, keep, strict=False) if bool(k)]
@@ -2154,7 +2218,7 @@ def run_pipeline(
     )
     save_loglog_eval(
         run_folder,
-        np.maximum(t_seconds - t_seconds[0], FRAME_DT_S),
+        allan_time_s,
         cm,
         pairs,
         labels,

@@ -50,6 +50,8 @@ Use these first:
   - Pending May 26 runs after the 2-tap FIR estimate.
 - `raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_raw_db_vs_dark.png`
   - Focused AB comparison for dark noise, Flint2-only, OPO/highpass `780 nm`, OPO `1560 nm` auto/manual, and OPO `1600 nm` manual runs.
+- `raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_raw_db_offset.png`
+  - Same focused AB raw PSD as absolute dB, but with a `12 dB` vertical offset added per trace so overlapping lines can be inspected.
 - `raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_dc_to_25khz_positive_offset_raw_db_vs_dark.png`
   - DC-to-`25 kHz` positive-offset view from the 76 MHz carrier, in dB relative to dark.
 - `raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_after_2tap_fir_db.png`
@@ -123,6 +125,40 @@ This AB comparison focuses only on the requested runs and windows:
 - Frames averaged: `32`
 - Data source: `Data_1_1.bin`, interleaved channel `1`
 
+### AB Raw PSD Offset Plot
+
+The new offset view is:
+
+```text
+raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_raw_db_offset.png
+```
+
+It is generated from the same `raw_db` values as the non-offset plot:
+
+```text
+raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_raw_db.png
+```
+
+The offset plot is for visual separation only. It does not change the underlying CSV values or the summary metrics. The script adds a fixed display offset after converting each PSD trace to dB:
+
+```text
+display_y_dB = raw_psd_dB + run_index * 12 dB
+```
+
+The current run order and display offsets are:
+
+| Run | Label | Display offset |
+|---|---|---:|
+| `20260515_092941` | Dark noise | `+0 dB` |
+| `20260515_133100` | Flint2 only @1030 | `+12 dB` |
+| `20260521_162959` | OPO/highpass @780 | `+24 dB` |
+| `20260526_141535` | OPO @1560 auto | `+36 dB` |
+| `20260526_143329` | OPO @1560 manual | `+48 dB` |
+| `20260526_150209` | OPO @1600 manual A | `+60 dB` |
+| `20260526_162112` | OPO @1600 manual B | `+72 dB` |
+
+Use the offset plot when the raw PSD traces overlap and you need to compare line shape. Use the non-offset raw PSD plot or `raw_db_vs_dark` plot when absolute vertical differences matter.
+
 The selected AB set is:
 
 | Run | Label | Mode | Wavelength | dB vs dark at 76 MHz | Max residual after 2-tap FIR |
@@ -140,6 +176,7 @@ Important caveat: raw-backed `1600 nm` automatic runs were not found. The `1600 
 Generated AB files:
 
 - `raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_raw_db.png`
+- `raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_raw_db_offset.png`
 - `raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_raw_db_vs_dark.png`
 - `raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_pm25khz_after_2tap_fir_db.png`
 - `raw_highres/ab_test_76mhz_pm25khz/ab_test_76mhz_dc_to_25khz_positive_offset_raw_db.png`
@@ -309,6 +346,8 @@ Then regenerate the labeled AB plots:
 ```powershell
 python "C:\Quantum Squeezing\prototype and postprocessing\post processing\fft_76mhz_ch1_1_analysis\scripts\make_ab_test_focus_plots.py"
 ```
+
+This script writes the original raw PSD plot and the new offset view. The offset amount is controlled by `AB_TRACE_OFFSET_DB` in `scripts/make_ab_test_focus_plots.py`; it is currently set to `12.0`.
 
 ## When To Use The Older Reference Files
 

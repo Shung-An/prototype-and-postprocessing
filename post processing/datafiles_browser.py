@@ -499,7 +499,12 @@ def canonicalize_dark_noise_tags(tags: list[str]) -> list[str]:
 def apply_dark_noise_tag_power_estimate(record: RunRecord) -> None:
     if not has_dark_noise_tag(record.tags):
         return
-    reference = nearest_non_dark_reference(record.folder_path)
+    # Reuse the reference already persisted in metadata. Looking it up again
+    # scans every sibling run and turns N dark-noise runs into N full folder
+    # scans during an otherwise cached run-list load.
+    reference = None
+    if record.physics.synthetic_conversion_factor_v2_rad2 is None:
+        reference = nearest_non_dark_reference(record.folder_path)
     record.physics.sample_power_mw = DARK_NOISE_TAG_POWER_ESTIMATE_MW
     record.physics.power_mw_1 = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW
     record.physics.power_mw_2 = DARK_NOISE_TAG_PORT_POWER_ESTIMATE_MW
@@ -744,12 +749,23 @@ def metadata_scan_velocity_mm_s(payload: dict[str, object]) -> float | None:
 
 
 def apply_browser_metadata_fields(record: RunRecord, payload: dict[str, object]) -> None:
+    physics_value = payload.get("PhysicsData")
+    physics = physics_value if isinstance(physics_value, dict) else {}
     record.physics.use_opo = metadata_use_opo(payload)
     record.physics.laser_wavelength_nm = metadata_laser_wavelength_nm(payload)
     record.physics.polarizer_used = metadata_polarizer_used(payload)
     record.physics.polarizer_name = metadata_polarizer_name(payload)
     record.physics.polarizer_extinction_ratio = metadata_polarizer_extinction_ratio(payload)
     record.physics.scan_velocity_mm_s = metadata_scan_velocity_mm_s(payload)
+    record.physics.synthetic_conversion_factor_applied = safe_bool(
+        physics.get("SyntheticConversionFactorApplied")
+    )
+    record.physics.synthetic_conversion_factor_v2_rad2 = safe_float(
+        physics.get("SyntheticConversionFactor_V2_rad2")
+    )
+    record.physics.dark_noise_reference_run_name = safe_text(physics.get("DarkNoiseReferenceRunName"))
+    record.physics.dark_noise_reference_run_folder = safe_text(physics.get("DarkNoiseReferenceRunFolder"))
+    record.physics.dark_noise_reference_time_delta_s = safe_float(physics.get("DarkNoiseReferenceTimeDelta_s"))
 
 
 def build_search_blob(run: RunRecord) -> str:
@@ -1312,10 +1328,10 @@ def load_runs_from_db(root_path: Path) -> list[RunRecord]:
             search_blob=row["search_blob"],
         )
         try:
-            if run.metadata_path and run.metadata_path.is_file():
-                current_metadata_text = run.metadata_path.read_text(encoding="utf-8")
-                if current_metadata_text != run.metadata_text:
-                    run = load_run_record(run.final_result_path)
+            # is_index_stale() has already compared the indexed timestamp with
+            # every run result and metadata file. Reading every metadata.json
+            # again here made a normal cached refresh scale with the number of
+            # runs and defeated most of the benefit of the SQLite index.
             payload = normalize_metadata(json.loads(run.metadata_text))
             apply_browser_metadata_fields(run, payload)
             apply_dark_noise_tag_power_estimate(run)
@@ -1360,6 +1376,7 @@ def index_run_folder(run_folder: Path, root_path: Path | None = None) -> RunReco
 
 
 def serialize_run(run: RunRecord) -> dict[str, object]:
+    allan_deviation_plot = run.folder_path / "allan_deviation_long_term.png"
     return {
         "folder_name": run.folder_name,
         "folder_path": str(run.folder_path),
@@ -1394,6 +1411,7 @@ def serialize_run(run: RunRecord) -> dict[str, object]:
         "loglog_plot_path": str(run.loglog_plot_path) if run.loglog_plot_path else "",
         "diagonal_offset_path": str(run.diagonal_offset_path) if run.diagonal_offset_path else "",
         "raw_std_plot_path": str(run.raw_std_plot_path) if run.raw_std_plot_path else "",
+        "allan_deviation_plot_path": str(allan_deviation_plot) if allan_deviation_plot.is_file() else "",
         "fft_low_plot_path": str(fft_output_path(run.folder_path, LOW_FREQUENCY_PLOT_NAME) or run.fft_low_plot_path or ""),
         "fft_high_plot_path": str(fft_output_path(run.folder_path, HIGH_FREQUENCY_PLOT_NAME) or run.fft_high_plot_path or ""),
         "fft_low_csv_path": str(fft_output_path(run.folder_path, LOW_FREQUENCY_CSV_NAME) or run.fft_low_csv_path or ""),
@@ -1419,6 +1437,8 @@ def launch_html_browser(root_path: Path | None = None, wait: bool = True) -> str
 
     root = (root_path or configured_root_path()).expanduser().resolve()
     state: dict[str, list[RunRecord]] = {"runs": []}
+    runs_lock = threading.RLock()
+    runs_loaded = False
     analysis_lock = threading.Lock()
     analysis_state: dict[str, object] = {
         "running": False,
@@ -1434,16 +1454,21 @@ def launch_html_browser(root_path: Path | None = None, wait: bool = True) -> str
     client_disconnect_errors = (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)
 
     def load_current_runs(rebuild: bool = False) -> list[RunRecord]:
-        if rebuild or is_index_stale(root):
-            runs = scan_runs(root)
-            write_runs_to_db(root, runs)
-        else:
-            runs = load_runs_from_db(root)
-            if not runs:
+        nonlocal runs_loaded
+        with runs_lock:
+            if rebuild or is_index_stale(root):
                 runs = scan_runs(root)
                 write_runs_to_db(root, runs)
-        state["runs"] = runs
-        return runs
+            elif runs_loaded:
+                return state["runs"]
+            else:
+                runs = load_runs_from_db(root)
+                if not runs:
+                    runs = scan_runs(root)
+                    write_runs_to_db(root, runs)
+            state["runs"] = runs
+            runs_loaded = True
+            return runs
 
     def find_run(folder_path: str) -> RunRecord | None:
         resolved = str(Path(folder_path).expanduser().resolve())
@@ -1590,6 +1615,7 @@ def launch_html_browser(root_path: Path | None = None, wait: bool = True) -> str
                 run.loglog_plot_path,
                 run.diagonal_offset_path,
                 run.raw_std_plot_path,
+                run.folder_path / "allan_deviation_long_term.png",
                 fft_output_path(run.folder_path, LOW_FREQUENCY_PLOT_NAME),
                 fft_output_path(run.folder_path, HIGH_FREQUENCY_PLOT_NAME),
                 fft_output_path(run.folder_path, LOW_FREQUENCY_CSV_NAME),

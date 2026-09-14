@@ -508,7 +508,8 @@
         <div class="preview-grid">
           <div class="card video-card" data-kind="movie_path" data-media="video"><div class="card-title">MP4 Player <button class="secondary">Open</button></div><div class="card-body"></div></div>
           <div class="card" data-kind="final_result_path"><div class="card-title">Final Result <button class="secondary">Open</button></div><div class="card-body"></div></div>
-          <div class="card" data-kind="loglog_plot_path"><div class="card-title">Log-Log Eval <button class="secondary">Open</button></div><div class="card-body"></div></div>
+          <div class="card" id="stabilityPlot" data-kind="loglog_plot_path"><div class="card-title">Stability / Log-Log <button class="secondary">Open</button></div><div class="card-body"></div></div>
+          <div class="card" data-kind="allan_deviation_plot_path"><div class="card-title">Long-Term Allan Deviation <button class="secondary">Open</button></div><div class="card-body"></div></div>
           <div class="card" data-kind="fft_low_plot_path"><div class="card-title">FFT Low Log-Log <span class="card-actions"><button class="secondary" data-action="open">Open</button><button class="secondary" data-action="save-png">Save PNG</button></span></div><div class="card-body"></div></div>
           <div class="card" data-kind="fft_high_plot_path"><div class="card-title">FFT High Semilog <button class="secondary">Open</button></div><div class="card-body"></div></div>
           <div class="card" data-kind="diagonal_offset_path"><div class="card-title">Diagonal Offset <button class="secondary">Open</button></div><div class="card-body"></div></div>
@@ -533,6 +534,7 @@
     const finalResultName = "final_clean_result.png";
     const movieName = "signal_emergence.mp4";
     const loglogPlotName = "loglog_eval.png";
+    const allanDeviationPlotName = "allan_deviation_long_term.png";
     const diagonalOffsetPlotNames = ["diagonal_offset_matrix_urad2.png", "diagonal_offset_matrix_V2.png"];
     const rawStdPlotNames = ["raw_std_over_time.png", "raw_std_within_parity.png"];
     const darkNoiseTagPortPowerEstimateMw = 0.01;
@@ -925,10 +927,11 @@
         return true;
       });
       filtered.sort(compareRuns);
+      if (!selected && filtered.length) selected = filtered[0];
       renderRows();
       renderPlotRunList();
       renderSelectionStatus();
-      if (!selected && filtered.length) selectRun(filtered[0].folder_path);
+      renderSelected();
     }
     function setTab(tabName) {
       const showPlots = tabName === "plots";
@@ -1472,6 +1475,7 @@
       const metadataHandle = await getFileHandleOrNull(directoryHandle, "metadata.json");
       const movieHandle = await getFileHandleOrNull(directoryHandle, movieName);
       const loglogHandle = await getFileHandleOrNull(directoryHandle, loglogPlotName);
+      const allanDeviationHandle = await getFileHandleOrNull(directoryHandle, allanDeviationPlotName);
       const diagonal = await firstExistingHandle(directoryHandle, diagonalOffsetPlotNames);
       const rawStd = await firstExistingHandle(directoryHandle, rawStdPlotNames);
       const metadata = await readJsonHandle(metadataHandle);
@@ -1554,15 +1558,17 @@
         final_result_path: pathFor(finalResultName),
         movie_path: movieHandle ? pathFor(movieName) : "",
         loglog_plot_path: loglogHandle ? pathFor(loglogPlotName) : "",
+        allan_deviation_plot_path: allanDeviationHandle ? pathFor(allanDeviationPlotName) : "",
         diagonal_offset_path: diagonal ? pathFor(diagonal.name) : "",
         raw_std_plot_path: rawStd ? pathFor(rawStd.name) : "",
         metadata_path: metadataHandle ? pathFor("metadata.json") : "",
         metadata_text: metadataText,
-        _handles: { directoryHandle, metadataHandle, finalHandle, movieHandle, loglogHandle, diagonalHandle: diagonal && diagonal.handle, rawStdHandle: rawStd && rawStd.handle }
+        _handles: { directoryHandle, metadataHandle, finalHandle, movieHandle, loglogHandle, allanDeviationHandle, diagonalHandle: diagonal && diagonal.handle, rawStdHandle: rawStd && rawStd.handle }
       };
       await objectUrlFor(finalHandle, run.final_result_path);
       if (movieHandle) await objectUrlFor(movieHandle, run.movie_path);
       if (loglogHandle) await objectUrlFor(loglogHandle, run.loglog_plot_path);
+      if (allanDeviationHandle) await objectUrlFor(allanDeviationHandle, run.allan_deviation_plot_path);
       if (diagonal) await objectUrlFor(diagonal.handle, run.diagonal_offset_path);
       if (rawStd) await objectUrlFor(rawStd.handle, run.raw_std_plot_path);
       if (metadataHandle) await objectUrlFor(metadataHandle, run.metadata_path);
@@ -1689,7 +1695,12 @@
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) refreshAfterExternalEdit().catch(err => setAnalysisStatus(err.message));
     });
-    loadRuns(false).catch(err => alert(err.message));
+    loadRuns(false).then(() => {
+      if (location.hash === "#stabilityPlot") {
+        setTab("plots");
+        document.getElementById("stabilityPlot").scrollIntoView({ block: "center" });
+      }
+    }).catch(err => alert(err.message));
   </script>
 </body>
 </html>

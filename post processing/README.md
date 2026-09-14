@@ -10,6 +10,16 @@ This folder contains the current post-processing workflow for Quantum Squeezing 
 
 The tools expect a `DataFiles` tree containing run folders with processed outputs such as `final_clean_result.png`, `metadata.json`, and optional `signal_emergence.mp4`.
 
+The main `loglog_eval.png` now shows overlapping Allan variance of the selected
+channel-pair differences; `allan_variance.csv` also exports Allan deviation and
+overlapping term counts. Averaging time uses the nominal acquisition frame clock,
+preserving frame gaps introduced by cleanup. Constant offsets cancel without
+detrending. Variance units are V⁴ or µrad⁴. Legacy grouped running-mean plots and
+signal-amplitude averages retain their existing meaning. For scanned runs, the
+Allan curve also contains delay-dependent signal changes; use a fixed-position
+run to assess stability. See [the fixed-position trial](allan_stability_20260817_160256/README.md)
+for a comparison, assumptions and reproduction commands.
+
 ## Quick Start
 
 From this folder:
@@ -221,6 +231,29 @@ Useful options:
 ```
 
 The pipeline writes processed plots, updates non-WPF-owned metadata fields, and updates the Data Browser index when it finishes.
+
+## Long-Term Allan Deviation
+
+The complete estimator, preprocessing equations, units, reliability rule, slope
+classification, metadata definitions, and interpretation limits are documented
+in [ALLAN_DEVIATION_METHOD.md](ALLAN_DEVIATION_METHOD.md).
+
+Run the standalone batch analyzer without rerunning the full post-processing pipeline:
+
+```powershell
+python .\allan_deviation_analysis.py "D:\Quantum Squeezing Project\DataFiles"
+```
+
+The analyzer pre-averages raw frames into approximately one-second samples, uses `profile.txt` timestamps when available, calculates overlapping Allan deviation for the nine most variable long-term channel pairs, and resumes by skipping unchanged runs. Use `--force` to recompute unchanged runs.
+
+Each completed run receives:
+
+- `allan_deviation_long_term.csv`: deviation and variance versus averaging time.
+- `allan_deviation_summary.csv`: minimum deviation, optimum averaging time, longest-tau deviation, slope, and behavior for each selected pair.
+- `allan_deviation_long_term.png`: Allan-deviation plot.
+- `PhysicsData.AllanDeviationAnalysis` and concise `PhysicsData.AllanDeviation*` summary fields in `metadata.json`.
+
+The DataFiles root also receives `allan_deviation_batch_summary.csv`, which records completed, skipped, and failed runs. The long-term slope labels are heuristic descriptions for these measured covariance differences; they are not a replacement for inspecting the raw trace and confidence at the longest averaging times.
 
 ## Critical Pairs
 
