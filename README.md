@@ -115,11 +115,31 @@ In practice, this folder follows a loose workflow:
 
 If you are new to this folder, start here:
 
-1. `post processing/README.md`
-2. `post processing/datafiles_browser.py`
-3. `post processing/cm_pipeline_all_in_one.py`
+1. [Post-processing guide](<post processing/README.md>)
+2. [DataFiles browser](<post processing/datafiles_browser.py>)
+3. [Covariance-matrix processing pipeline](<post processing/cm_pipeline_all_in_one.py>)
 
 Then explore the more specialized folders only if you need those specific experiments.
+
+## Instruction and Reference Links
+
+### Post-processing
+
+- [Post-processing setup and usage](<post processing/README.md>)
+- [Covariance-matrix pipeline instructions](<post processing/CM_PIPELINE_INSTRUCTIONS.md>)
+- [76 MHz channel analysis notes](<post processing/fft_76mhz_ch1_1_analysis/README.md>)
+
+### Allan deviation
+
+- [Allan tools, results, and reproduction instructions](<post processing/allan_deviation/README.md>)
+- [Allan-deviation method, units, assumptions, and references](<post processing/allan_deviation/ALLAN_DEVIATION_METHOD.md>)
+- [Fixed-position stability comparison and reproduction instructions](<post processing/allan_deviation/allan_stability_20260817_160256/README.md>)
+
+### Spatial-filter simulations
+
+- [Spatial-filter simulation guide](<Spatial Filter Simulation/README.md>)
+- [OPO cavity mode-mixing guide](<Spatial Filter Simulation/README_OPO_Cavity_Mode_Mixing.md>)
+- [Simulation figure reference](<Spatial Filter Simulation/Figures.md>)
 
 ## Notes for Future Organization
 
