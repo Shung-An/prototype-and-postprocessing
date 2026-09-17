@@ -3,6 +3,12 @@ import argparse
 import json
 from pathlib import Path
 
+
+# Support direct CLI execution while importing the shared processing pipeline.
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import numpy as np
 import cm_pipeline_all_in_one as p
 

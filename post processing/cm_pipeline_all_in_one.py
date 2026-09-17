@@ -31,7 +31,7 @@ BIN_MM = 0.1
 # Attenuator correction is supplied by WPF metadata and read directly by this pipeline.
 DETECTOR_AREA_SCALE = (0.24**2) / (32768**2)
 # Bump this when a code or assumption change should force existing runs to rebuild once.
-PIPELINE_CACHE_VERSION = "2026-09-11-overlapping-allan-variance-v1"
+PIPELINE_CACHE_VERSION = "2026-09-16-running-average-and-allan-separated-v3"
 # Conversion factor from distance in millimeters to time in picoseconds for this setup.
 MM_TO_PS = 6.6
 # Time per processed frame, in seconds:
@@ -104,6 +104,12 @@ REQUIRED_PIPELINE_OUTPUTS = [
     "final_result_ALL_PAIRS.png",
     "final_clean_result.png",
     "loglog_eval.png",
+    "allan_variance.png",
+    "allan_deviation_long_term.png",
+    "allan_deviation_long_term.csv",
+    "allan_deviation_summary.csv",
+    "critical_pairs_running_average.png",
+    "critical_pairs_running_average.csv",
     "matrix_pattern_heatmaps.png",
 ]
 
@@ -1457,7 +1463,7 @@ def overlapping_allan_variance(
     return factors * dt, np.asarray(variances), np.asarray(counts), factors
 
 
-def save_loglog_eval(
+def save_allan_variance_plot(
     run_folder: Path,
     time_tail: np.ndarray,
     cm: np.ndarray,
@@ -1482,7 +1488,7 @@ def save_loglog_eval(
         fig, ax = plt.subplots(figsize=(9, 6.5))
         ax.text(0.5, 0.5, str(exc), ha="center", va="center", wrap=True)
         ax.set_axis_off()
-        save_figure_with_provenance(fig, run_folder / "loglog_eval.png", run_folder)
+        save_figure_with_provenance(fig, run_folder / "allan_variance.png", run_folder)
         plt.close(fig)
         warnings.warn(str(exc))
         return
@@ -1505,7 +1511,7 @@ def save_loglog_eval(
     ax.grid(True, which="both", alpha=0.2)
     ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
     fig.tight_layout()
-    save_figure_with_provenance(fig, run_folder / "loglog_eval.png", run_folder)
+    save_figure_with_provenance(fig, run_folder / "allan_variance.png", run_folder)
     plt.close(fig)
 
 
@@ -1665,6 +1671,52 @@ def save_loglog_eval_pairs_runmean(
             run_folder,
         )
         plt.close(fig)
+
+
+def save_critical_pairs_running_average(
+    run_folder: Path,
+    cm: np.ndarray,
+    time_s: np.ndarray,
+    pairs: np.ndarray,
+    labels: list[str],
+    conversion_factor: float,
+    keep_indices: list[int],
+    display_in_v2: bool,
+) -> None:
+    """Save signed cumulative means; plot their magnitudes on log axes.
+
+    Includes every retained frame from the start of the processed series.
+    The timestamps retain nominal acquisition gaps introduced by frame gating.
+    """
+    selected = keep_indices or list(range(min(CRITICAL_PAIR_MAX_COUNT, len(pairs))))
+    selected_pairs = pairs[np.asarray(selected, dtype=int)]
+    left = np.array([idx_lin(pair[0], pair[1]) for pair in selected_pairs], dtype=int)
+    right = np.array([idx_lin(pair[2], pair[3]) for pair in selected_pairs], dtype=int)
+    differences = cm[:, left] - cm[:, right]
+    means = np.cumsum(differences, axis=0) / np.arange(1, len(cm) + 1)[:, None]
+    curves = scale_for_display(means, conversion_factor, display_in_v2)
+    elapsed = np.asarray(time_s, dtype=float) - time_s[0] + FRAME_DT_S
+    with (run_folder / "critical_pairs_running_average.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["elapsed_nominal_s", "retained_frames", *[labels[i] for i in selected]])
+        for row, elapsed_s in enumerate(elapsed):
+            writer.writerow([elapsed_s, row + 1, *curves[row]])
+    fig, ax = plt.subplots(figsize=(10, 7))
+    for col, pair_index in enumerate(selected):
+        magnitude = np.abs(curves[:, col])
+        magnitude[~np.isfinite(magnitude) | (magnitude <= 0)] = np.nan
+        xplot, yplot = downsample_for_plot(elapsed, magnitude)
+        ax.loglog(xplot, yplot, label=labels[pair_index])
+    ax.set_xlabel("Elapsed nominal acquisition time (s)")
+    ax.set_ylabel(running_mean_axis_label(display_in_v2, use_abs=True))
+    ax.set_title("Critical pairs: cumulative running average (from first retained frame)")
+    ax.grid(True, which="both", alpha=0.2)
+    ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
+    fig.tight_layout()
+    save_figure_with_provenance(fig, run_folder / "critical_pairs_running_average.png", run_folder)
+    # Historical browser filename belongs to cumulative running averages.
+    save_figure_with_provenance(fig, run_folder / "loglog_eval.png", run_folder)
+    plt.close(fig)
 
 
 def save_variation_and_fft(
@@ -2216,7 +2268,7 @@ def run_pipeline(
         display_in_v2,
         title_note,
     )
-    save_loglog_eval(
+    save_allan_variance_plot(
         run_folder,
         allan_time_s,
         cm,
@@ -2229,6 +2281,10 @@ def run_pipeline(
     save_heatmaps(run_folder, cm, conversion_factor)
     save_semilogy_grouped_64channels(run_folder, cm, conversion_factor, display_in_v2)
     save_loglog_eval_pairs_runmean(run_folder, cm, pairs, labels, conversion_factor, display_in_v2)
+    save_critical_pairs_running_average(
+        run_folder, cm, allan_time_s, pairs, labels, conversion_factor,
+        critical_keep_indices, display_in_v2,
+    )
     save_grouped_loglog_convergence(run_folder, bin_vals, bin_cumsums, labels, len(labels), display_in_v2)
     if ENABLE_FFT_ANALYSIS:
         report_progress(86, "Saving FFT plots")
@@ -2237,6 +2293,14 @@ def run_pipeline(
     save_signal_emergence_movie(run_folder, ts, counts, bin_cumsums, labels, critical_keep_indices, display_in_v2, title_note)
     report_progress(98, "Updating metadata and index")
     update_metadata_json(run_folder, meta)
+    report_progress(99, "Saving long-term Allan deviation")
+    from allan_deviation.allan_deviation_analysis import (
+        analyze_run, DEFAULT_BASE_TAU_S, DEFAULT_MAX_POINTS, DEFAULT_MAX_PAIRS,
+    )
+    analyze_run(
+        run_folder, DEFAULT_BASE_TAU_S, DEFAULT_MAX_POINTS, DEFAULT_MAX_PAIRS,
+        force=True,
+    )
     update_datafiles_browser_index(run_folder)
     report_progress(100, "Finished run")
 

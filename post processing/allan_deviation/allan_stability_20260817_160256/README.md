@@ -47,6 +47,6 @@ Method reference: [NIST Handbook of Frequency Stability Analysis](https://nvlpub
 Reproduce from the repository root:
 
 ```powershell
-python 'post processing/compare_allan_stability.py' 'D:\Quantum Squeezing Project\DataFiles\20260817_160256' 'post processing/allan_stability_20260817_160256'
-python -m unittest discover -s 'post processing' -p 'test_allan_variance.py'
+python 'post processing/allan_deviation/compare_allan_stability.py' 'D:\Quantum Squeezing Project\DataFiles\20260817_160256' 'post processing/allan_deviation/allan_stability_20260817_160256'
+python -m unittest discover -s 'post processing/allan_deviation' -p 'test_allan_variance.py'
 ```

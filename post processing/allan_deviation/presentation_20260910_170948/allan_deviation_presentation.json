@@ -1,0 +1,37 @@
+{
+  "run": "D:\\Quantum Squeezing Project\\DataFiles\\20260910_170948",
+  "pair_labels": [
+    "(7,6)-(8,7)",
+    "(6,5)-(8,7)",
+    "(7,5)-(8,6)",
+    "(6,7)-(7,8)",
+    "(6,6)-(8,8)",
+    "(5,6)-(7,8)",
+    "(5,7)-(6,8)",
+    "(6,4)-(8,6)",
+    "(7,7)-(8,8)"
+  ],
+  "aggregation": "equal-weight arithmetic mean of individual Allan deviations",
+  "deviation_unit": "urad^2",
+  "first_tau_s": 0.013783172186792841,
+  "first_mean_deviation": 41.3846306545541,
+  "last_tau_s": 117.89913698731834,
+  "last_mean_deviation": 23.31537563495505,
+  "mean_curve_tail_slope": -0.1658412689151579,
+  "fit_points": 8,
+  "last_short_tau_s": 0.9923883974490846,
+  "first_long_tau_s": 1.0076849315155414,
+  "short_source": "C:\\Quantum Squeezing\\prototype and postprocessing\\post processing\\allan_deviation\\presentation_20260910_170948\\allan_deviation_presentation.csv",
+  "long_source": "D:\\Quantum Squeezing Project\\DataFiles\\20260910_170948\\allan_deviation_long_term.csv",
+  "method_notes": [
+    "Equal-weight mean of the nine individual Allan deviations at each averaging time; no smoothing or detrending.",
+    "Ranges joined near 1 s: nominal frame timing below the join; saved profile-timed, binned results above it.",
+    "Tail slope fits the final eight mean-curve points. This delay-scan record does not identify a stationary noise process."
+  ],
+  "experiment_conditions": [
+    "Vacuum sanity check | 780 nm | 294 K | OPO enabled | Si detector",
+    "High-pass + band-pass filters | Power-detector attenuation: 40 dB | Duration: 20 min 07 s",
+    "Delay scan: 15-35 mm at 2 mm/s | Recorded powers (1 / 2): 0.24 / 0.31 mW"
+  ],
+  "conditions_source": "D:\\Quantum Squeezing Project\\DataFiles\\20260910_170948\\metadata.json"
+}

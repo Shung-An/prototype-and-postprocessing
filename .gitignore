@@ -47,3 +47,6 @@ env/
 # *.csv
 # *.txt
 # *.mph
+
+# Generated high-resolution spectrum (over GitHub's 100 MB file limit)
+post processing/fft_76mhz_ch1_1_analysis/raw_highres/full_spectrum/ch1_1_full_spectrum_selected.csv

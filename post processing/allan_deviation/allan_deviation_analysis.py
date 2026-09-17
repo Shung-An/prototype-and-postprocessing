@@ -9,11 +9,17 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
 import matplotlib.pyplot as plt
+
+# Support direct CLI execution while importing the shared processing pipeline.
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import numpy as np
 
 import cm_pipeline_all_in_one as pipeline
@@ -605,6 +611,22 @@ def report_row(run_folder: Path, status: str, summary: dict[str, object] | None,
     }
 
 
+def analyze_run_job(
+    job: tuple[Path, float, int, int, bool],
+) -> tuple[Path, str, dict[str, object] | None, str, float]:
+    """Process one run in a worker without writing the root batch report."""
+    run_folder, base_tau_s, max_points, max_pairs, force = job
+    started = time.perf_counter()
+    try:
+        result = analyze_run(run_folder, base_tau_s, max_points, max_pairs, force)
+        summary = result.get("summary")
+        summary = summary if isinstance(summary, dict) else None
+        return run_folder, str(result["status"]), summary, "", time.perf_counter() - started
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        return run_folder, "failed", None, error, time.perf_counter() - started
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Batch long-term Allan-deviation analysis for Quantum Squeezing runs.")
     parser.add_argument("root", nargs="?", type=Path, default=DEFAULT_ROOT)
@@ -613,13 +635,14 @@ def main() -> int:
     parser.add_argument("--max-pairs", type=int, default=DEFAULT_MAX_PAIRS)
     parser.add_argument("--force", action="store_true", help="Recompute runs whose source fingerprint is unchanged.")
     parser.add_argument("--limit", type=int, default=0, help="Analyze only the first N runs; useful for testing.")
+    parser.add_argument("--workers", type=int, default=1, help="Independent run workers (default: 1).")
     args = parser.parse_args()
 
     root = args.root.expanduser().resolve()
     if not root.is_dir():
         parser.error(f"DataFiles root was not found: {root}")
-    if args.base_tau <= 0 or args.max_points < 2 or args.max_pairs < 1:
-        parser.error("base-tau must be positive, max-points >= 2, and max-pairs >= 1.")
+    if args.base_tau <= 0 or args.max_points < 2 or args.max_pairs < 1 or args.workers < 1:
+        parser.error("base-tau must be positive, max-points >= 2, max-pairs >= 1, and workers >= 1.")
 
     cm_paths = sorted(root.rglob("cm.bin"), key=lambda path: str(path.parent).lower())
     if args.limit > 0:
@@ -632,36 +655,35 @@ def main() -> int:
     skipped = 0
     batch_started = time.perf_counter()
 
-    for index, cm_path in enumerate(cm_paths, start=1):
-        run_folder = cm_path.parent
-        run_started = time.perf_counter()
-        try:
-            result = analyze_run(
-                run_folder,
-                base_tau_s=args.base_tau,
-                max_points=args.max_points,
-                max_pairs=args.max_pairs,
-                force=args.force,
-            )
-            status = str(result["status"])
-            summary = result.get("summary")
-            summary = summary if isinstance(summary, dict) else None
-            rows.append(report_row(run_folder, status, summary))
-            if status == "skipped":
+    jobs = [(path.parent, args.base_tau, args.max_points, args.max_pairs, args.force) for path in cm_paths]
+    if args.workers == 1:
+        results = map(analyze_run_job, jobs)
+        executor = None
+    else:
+        executor = ProcessPoolExecutor(max_workers=args.workers)
+        futures = [executor.submit(analyze_run_job, job) for job in jobs]
+        results = (future.result() for future in as_completed(futures))
+
+    try:
+        for index, (run_folder, status, summary, error, elapsed) in enumerate(results, start=1):
+            rows.append(report_row(run_folder, status, summary, error))
+            if status == "failed":
+                failures += 1
+                print(f"[{index}/{total}] FAILED {run_folder.name}: {error}", flush=True)
+            elif status == "skipped":
                 skipped += 1
+                print(f"[{index}/{total}] SKIPPED {run_folder.name} ({elapsed:.2f}s)", flush=True)
             else:
                 completed += 1
-            elapsed = time.perf_counter() - run_started
-            print(f"[{index}/{total}] {status.upper()} {run_folder.name} ({elapsed:.2f}s)", flush=True)
-        except Exception as exc:
-            failures += 1
-            rows.append(report_row(run_folder, "failed", None, f"{type(exc).__name__}: {exc}"))
-            print(f"[{index}/{total}] FAILED {run_folder.name}: {type(exc).__name__}: {exc}", flush=True)
-        if index % 10 == 0:
-            write_batch_report(root, rows)
+                print(f"[{index}/{total}] OK {run_folder.name} ({elapsed:.2f}s)", flush=True)
+            if index % 10 == 0:
+                write_batch_report(root, sorted(rows, key=lambda row: str(row["run_folder"]).lower()))
+    finally:
+        if executor is not None:
+            executor.shutdown()
 
     elapsed = time.perf_counter() - batch_started
-    write_batch_report(root, rows)
+    write_batch_report(root, sorted(rows, key=lambda row: str(row["run_folder"]).lower()))
     print(
         f"Finished {total} runs in {elapsed:.1f}s: completed={completed}, skipped={skipped}, failed={failures}",
         flush=True,

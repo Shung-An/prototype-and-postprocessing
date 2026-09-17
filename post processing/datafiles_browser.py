@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import html
 import math
 import os
 import re
@@ -1377,6 +1378,22 @@ def index_run_folder(run_folder: Path, root_path: Path | None = None) -> RunReco
 
 def serialize_run(run: RunRecord) -> dict[str, object]:
     allan_deviation_plot = run.folder_path / "allan_deviation_long_term.png"
+    allan_important_result = ""
+    allan_long_term_behavior = ""
+    try:
+        payload = json.loads(run.metadata_text)
+        physics = payload.get("PhysicsData", {}) if isinstance(payload, dict) else {}
+        if isinstance(physics, dict):
+            analysis = physics.get("AllanDeviationAnalysis", {})
+            analysis = analysis if isinstance(analysis, dict) else {}
+            allan_important_result = safe_text(
+                physics.get("AllanDeviationImportantResult") or analysis.get("ImportantResult")
+            )
+            allan_long_term_behavior = safe_text(
+                physics.get("AllanDeviationLongTermBehavior") or analysis.get("LongTermBehavior")
+            )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
     return {
         "folder_name": run.folder_name,
         "folder_path": str(run.folder_path),
@@ -1388,6 +1405,8 @@ def serialize_run(run: RunRecord) -> dict[str, object]:
         "tags": run.tags,
         "filename": run.filename or "",
         "duration": run.duration or "",
+        "allan_important_result": allan_important_result,
+        "allan_long_term_behavior": allan_long_term_behavior,
         "star": run.star_measurement,
         "port_power": run.port_power_display,
         "sample_power": run.sample_power_display,
@@ -1426,6 +1445,24 @@ def html_browser_page() -> str:
     if not index_path.is_file():
         raise FileNotFoundError(f"index.html was not found next to datafiles_browser.py: {index_path}")
     return index_path.read_text(encoding="utf-8")
+
+
+def pipeline_python() -> str:
+    """Locate a Python capable of running the scientific pipeline."""
+    candidates = [sys.executable, shutil.which("python"), shutil.which("python3")]
+    failures = []
+    for candidate in dict.fromkeys(item for item in candidates if item):
+        try:
+            check = subprocess.run(
+                [candidate, "-c", "import numpy, matplotlib, tkinter, imageio"],
+                capture_output=True, text=True, timeout=20,
+            )
+            if check.returncode == 0:
+                return candidate
+            failures.append(f"{candidate}: {check.stderr.strip()}")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            failures.append(f"{candidate}: {exc}")
+    raise RuntimeError("No Python with pipeline dependencies was found. " + "\n".join(failures))
 
 
 def launch_html_browser(root_path: Path | None = None, wait: bool = True) -> str:
@@ -1533,7 +1570,6 @@ def launch_html_browser(root_path: Path | None = None, wait: bool = True) -> str
         return archived
 
     def rerun_analysis_subprocess(script_path: Path, folder_paths: list[Path], label: str) -> None:
-        command = [sys.executable, str(script_path), "--force", *[str(path) for path in folder_paths]]
         output_lines: list[str] = []
         return_code = -1
         total_runs = max(1, len(folder_paths))
@@ -1545,8 +1581,10 @@ def launch_html_browser(root_path: Path | None = None, wait: bool = True) -> str
             return max(0, min(99, round(((completed_runs + current_run_percent / 100.0) / total_runs) * 100)))
 
         try:
+            command = [pipeline_python(), "-u", str(script_path), "--force", *[str(path) for path in folder_paths]]
             process = subprocess.Popen(
                 command,
+                cwd=str(script_path.parent),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -1608,6 +1646,8 @@ def launch_html_browser(root_path: Path | None = None, wait: bool = True) -> str
     def allowed_path(raw_path: str) -> Path:
         path = Path(raw_path).expanduser().resolve()
         for run in state.get("runs", []):
+            if path.is_file() and path.parent == run.folder_path.resolve():
+                return path
             allowed = [
                 run.folder_path,
                 run.final_result_path,
@@ -1710,6 +1750,18 @@ def launch_html_browser(root_path: Path | None = None, wait: bool = True) -> str
                 if parsed.path == "/asset":
                     query = urllib.parse.parse_qs(parsed.query)
                     path = allowed_path(query.get("path", [""])[0])
+                    if path.is_dir():
+                        links = []
+                        for child in sorted(path.iterdir(), key=lambda item: item.name.lower()):
+                            if child.is_file() and child.resolve().parent == path:
+                                href = "/asset?" + urllib.parse.urlencode({"path": str(child)})
+                                links.append(f'<li><a href="{html.escape(href, quote=True)}">{html.escape(child.name)}</a></li>')
+                        self.send_text(
+                            '<!doctype html><meta charset="utf-8"><title>Run files</title>'
+                            + '<h1>Run files</h1><p>' + html.escape(str(path)) + '</p><ul>'
+                            + ''.join(links) + '</ul>', content_type="text/html",
+                        )
+                        return
                     if not path.is_file():
                         self.send_text("File not found", status=404)
                         return

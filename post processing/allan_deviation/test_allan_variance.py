@@ -1,5 +1,12 @@
 import unittest
 
+
+# Support direct CLI execution while importing the shared processing pipeline.
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import numpy as np
 from cm_pipeline_all_in_one import overlapping_allan_variance
 

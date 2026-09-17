@@ -238,15 +238,15 @@ The pipeline writes processed plots, updates non-WPF-owned metadata fields, and 
 
 The complete estimator, preprocessing equations, units, reliability rule, slope
 classification, metadata definitions, and interpretation limits are documented
-in [ALLAN_DEVIATION_METHOD.md](ALLAN_DEVIATION_METHOD.md).
+in [ALLAN_DEVIATION_METHOD.md](allan_deviation/ALLAN_DEVIATION_METHOD.md).
 
 Run the standalone batch analyzer without rerunning the full post-processing pipeline:
 
 ```powershell
-python .\allan_deviation_analysis.py "D:\Quantum Squeezing Project\DataFiles"
+python .\allan_deviation\allan_deviation_analysis.py "D:\Quantum Squeezing Project\DataFiles" --workers 4
 ```
 
-The analyzer pre-averages raw frames into approximately one-second samples, uses `profile.txt` timestamps when available, calculates overlapping Allan deviation for the nine most variable long-term channel pairs, and resumes by skipping unchanged runs. Use `--force` to recompute unchanged runs.
+The analyzer pre-averages raw frames into approximately one-second samples, uses `profile.txt` timestamps when available, calculates overlapping Allan deviation for the nine most variable long-term channel pairs, and resumes by skipping unchanged runs. Independent runs can be processed concurrently with `--workers`; four workers is a practical default for this dataset. Use `--force` to recompute unchanged runs.
 
 Each completed run receives:
 
